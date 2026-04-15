@@ -1,0 +1,30 @@
+# Reference repos (clone separately)
+ClawTeam/
+OpenHarness/
+ciana-parrot/
+claw-code/
+nanobot/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Config overrides
+config.local.yaml
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
