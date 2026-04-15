@@ -33,7 +33,8 @@
 23. [Docker Deployment](#23-docker-deployment)
 24. [Project Structure](#24-project-structure)
 25. [Phased Roadmap](#25-phased-roadmap)
-26. [Non-Functional Requirements](#26-non-functional-requirements)
+26. [Gap Analysis Addendum — 35 Features from Reference Repos](#26-gap-analysis-addendum)
+27. [Non-Functional Requirements](#27-non-functional-requirements)
 
 ---
 
@@ -1255,7 +1256,7 @@ Dream runs per-user:
 
 ## 20. Web UI (Management Dashboard)
 
-### 23.1 Design Philosophy
+### 20.1 Design Philosophy
 
 Two interaction modes, each optimized for its context:
 
@@ -1266,7 +1267,7 @@ Two interaction modes, each optimized for its context:
 
 The Web UI is **not** a chat replacement — it's a management console. Users chat via their preferred channel, then open the dashboard when they need visibility or control over complex operations.
 
-### 23.2 Architecture
+### 20.2 Architecture
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -1296,7 +1297,7 @@ The Web UI is **not** a chat replacement — it's a management console. Users ch
 
 The API server (already in spec as the OpenAI-compatible API channel) is extended with management endpoints. The Web UI is a static frontend that talks to this API.
 
-### 23.3 Pages & Features
+### 20.3 Pages & Features
 
 #### Chat Panel
 - Real-time conversation with the agent (via WebSocket)
@@ -1327,7 +1328,7 @@ The API server (already in spec as the OpenAI-compatible API channel) is extende
 - **Cost report** — per-user, per-tier, per-agent breakdown with date range filter
 - **Dream log** — history of memory changes with Git diff view and restore button
 
-### 23.4 Real-Time Updates
+### 20.4 Real-Time Updates
 
 The Web UI subscribes to the same `StreamEvent` system defined in Section 6:
 
@@ -1344,7 +1345,7 @@ WebSocket connection: ws://localhost:8900/ws?token=...
 
 No polling. All updates are push-based via WebSocket.
 
-### 23.5 Technology Stack
+### 20.5 Technology Stack
 
 | Component | Technology | Rationale |
 |-----------|-----------|-----------|
@@ -1356,7 +1357,7 @@ No polling. All updates are push-based via WebSocket.
 | Markdown | react-markdown | For memory file preview |
 | Code editor | Monaco (lightweight) | For editing YAML config and .md files |
 
-### 23.6 API Extensions
+### 20.6 API Extensions
 
 The OpenAI-compatible API channel (Section 11) is extended with management endpoints:
 
@@ -1404,7 +1405,7 @@ GET    /v1/cost/breakdown             # Per-user, per-tier, per-agent
 WS     /ws                            # Real-time StreamEvent subscription
 ```
 
-### 23.7 Authentication
+### 20.7 Authentication
 
 Web UI authenticates via a static token (for personal use) or JWT (for multi-user):
 
@@ -1419,7 +1420,7 @@ api:
     jwt_secret: "${JWT_SECRET}"  # For JWT auth
 ```
 
-### 23.8 Phase Delivery
+### 20.8 Phase Delivery
 
 | Phase | Deliverable |
 |-------|-------------|
@@ -1879,9 +1880,861 @@ lang-agent-platform/
 
 ---
 
-## 26. Non-Functional Requirements
+## 26. Gap Analysis Addendum — 35 Features from Reference Repos
 
-### 26.1 Performance
+*Added 2026-04-15 after deep-dive gap analysis across all 5 reference repos (ClawTeam, OpenHarness, ciana-parrot, nanobot, claw-code). Each gap was found by reading actual source code, not just READMEs.*
+
+---
+
+### 26.1 Sub-Agent Lifecycle & Recovery
+
+#### GAP-1: Context Recovery for Agent Re-Spawns (ClawTeam)
+
+When a sub-agent crashes and our recovery chain (AD-12) retries it, the respawned agent starts with zero context. ClawTeam's `ContextRecovery` class builds a 5-layer recovery prompt scoped by role:
+
+1. **Iteration context** — what iteration the agent was on
+2. **Task progress** — which tasks were complete, which in-flight
+3. **Git summary** — recent commits from the agent's branch
+4. **Artifacts** — files/outputs the agent produced before crashing
+5. **Teammate status** — what other agents are doing (for coordination)
+
+Executors see only their own tasks; evaluators see all contracts.
+
+**Spec addition to Section 8.4 (Recovery):**
+```python
+async def build_recovery_context(agent_id: str, role: str, store: BaseStore) -> str:
+    """Build role-scoped recovery prompt for a re-spawned agent."""
+    ctx = []
+    ctx.append(f"You are resuming after a failure. Your role: {role}")
+    ctx.append(f"Task progress: {await get_task_status(agent_id, store)}")
+    ctx.append(f"Your recent work: {await get_git_log(agent_id)}")
+    ctx.append(f"Artifacts produced: {await get_artifacts(agent_id, store)}")
+    if role != "executor":
+        ctx.append(f"Team status: {await get_all_agents_status(store)}")
+    return "\n".join(ctx)
+```
+
+#### GAP-2: Worker State Machine (claw-code)
+
+Our sub-agent lifecycle needs explicit states for health monitoring to work. Adopted from claw-code's `WorkerRegistry`:
+
+```
+SPAWNING → READY → RUNNING → FINISHED
+    │         │        │
+    │         │        ├→ BLOCKED (waiting on approval/resource)
+    │         │        │
+    │         │        └→ FAILED
+    │         │
+    │         └→ (trust prompt auto-resolution if needed)
+    │
+    └→ FAILED (spawn error)
+```
+
+**State transitions emit events** via BaseStore for the master to observe.
+
+**Spec addition to Section 8:**
+```python
+class SubAgentState(str, Enum):
+    SPAWNING = "spawning"           # asyncio.Task created, graph compiling
+    READY = "ready"                 # Graph compiled, awaiting first invocation
+    RUNNING = "running"             # Processing messages/tools
+    BLOCKED = "blocked"             # Waiting on permission approval or resource
+    FINISHED = "finished"           # Completed successfully
+    FAILED = "failed"              # Unrecoverable error
+```
+
+#### GAP-3: Graceful Shutdown Protocol (ClawTeam)
+
+`recall_agent` needs a handshake, not just `task.cancel()`:
+
+1. Master writes `{"action": "shutdown"}` to agent's BaseStore directive
+2. Agent sees directive, finishes current tool call, writes final result
+3. Agent writes `{"status": "shutting_down", "partial_results": ...}` to BaseStore
+4. Master reads partial results, merges git worktree if applicable
+5. Master cancels asyncio.Task only after agent acknowledges or timeout (30s)
+
+This prevents mid-flight interrupts that corrupt files or lose work.
+
+#### GAP-4: Dead Agent Detection with Task Rebalancing (ClawTeam)
+
+When a sub-agent dies, its assigned tasks should be reassigned:
+
+1. Health monitor detects stale heartbeat (>120s)
+2. Mark agent as FAILED
+3. Collect unfinished tasks from the dead agent's BaseStore
+4. Reassign to another agent with compatible role/skills
+5. If no compatible agent exists, spawn a replacement
+
+This is distinct from our retry chain (which retries the same agent). Rebalancing redistributes work.
+
+---
+
+### 26.2 Harness Phase System
+
+#### GAP-5: Phase Gates (ClawTeam)
+
+Phases without gates are just labels. Each phase transition must pass through gates:
+
+```python
+class PhaseGate(ABC):
+    @abstractmethod
+    async def check(self, context: HarnessContext) -> GateResult:
+        """Return (passed: bool, reason: str)"""
+
+class ArtifactRequiredGate(PhaseGate):
+    """Blocks advance until specified artifacts exist in BaseStore."""
+    required_artifacts: list[str]
+
+class AllTasksCompleteGate(PhaseGate):
+    """Blocks until all tasks in the task board are completed."""
+
+class HumanApprovalGate(PhaseGate):
+    """Blocks until user approves via channel (uses LangGraph interrupt())."""
+
+class CustomGate(PhaseGate):
+    """Plugin-provided gate with custom logic."""
+```
+
+**Phase transitions:**
+```
+discuss ──[HumanApprovalGate]──→ plan
+plan ──[ArtifactRequiredGate("plan.md")]──→ execute
+execute ──[AllTasksCompleteGate]──→ verify
+verify ──[ArtifactRequiredGate("test_report.md")]──→ ship
+```
+
+Gates are extensible via plugins (`contribute_gates()` hook).
+
+#### GAP-6: Git Conflict Detection Between Agent Worktrees (ClawTeam)
+
+When multiple agents edit code in separate worktrees, detect overlaps before merge:
+
+```python
+async def detect_conflicts(agent_worktrees: dict[str, str]) -> list[Conflict]:
+    """Analyze git diffs across all agent worktrees for overlapping changes."""
+    conflicts = []
+    for (agent_a, path_a), (agent_b, path_b) in combinations(agent_worktrees.items(), 2):
+        diff_a = git_diff(path_a, base_branch)
+        diff_b = git_diff(path_b, base_branch)
+        overlapping_files = set(diff_a.files) & set(diff_b.files)
+        for file in overlapping_files:
+            hunks_a = diff_a.hunks[file]
+            hunks_b = diff_b.hunks[file]
+            if lines_overlap(hunks_a, hunks_b):
+                severity = "high"  # Same lines modified
+            else:
+                severity = "medium"  # Same file, different lines
+            conflicts.append(Conflict(file, agent_a, agent_b, severity))
+    return conflicts
+```
+
+Run before `recall_agent` merges a worktree. On high-severity conflicts, notify the master agent to resolve.
+
+#### GAP-7: Green-Level Contracts (claw-code)
+
+When the verify phase runs tests, distinguish between test levels:
+
+| Level | Meaning | Merge policy |
+|-------|---------|-------------|
+| `targeted` | Only tests related to changed code pass | Not merge-ready |
+| `package` | All tests in affected package pass | Conditional merge |
+| `workspace` | All tests in workspace pass | Merge-ready |
+| `merge_ready` | All tests + linting + type-checking pass | Ship-ready |
+
+The verify agent must specify which green level was achieved. The ship gate requires `merge_ready`.
+
+---
+
+### 26.3 Memory & Context
+
+#### GAP-8: Dream Phase 1/Phase 2 Separation (nanobot)
+
+Dream is not one LLM call — it's two distinct phases with different capabilities:
+
+**Phase 1 — Analysis (no tools):**
+- Plain LLM call analyzing new history entries
+- Produces a text summary of what changed and what to remember
+- Max batch: 20 history entries per run
+- No tools available — pure reflection
+
+**Phase 2 — Editing (restricted tools):**
+- Uses `AgentRunner` with only 3 tools: `read_file`, `edit_file`, `write_file`
+- Makes surgical edits to SOUL.md, USER.md, MEMORY.md
+- Max iterations: 10 tool calls
+- No web search, no exec, no gateway — prevents side effects during reflection
+
+#### GAP-9: Task Focus State Tracking (OpenHarness)
+
+Maintain interim state across turns that survives compaction:
+
+```python
+@dataclass
+class TaskFocusState:
+    goal: str = ""                          # Current user goal (max 240 chars)
+    recent_goals: list[str] = field(default_factory=list)  # Last 5 goals
+    active_artifacts: list[str] = field(default_factory=list)  # Files being worked on
+    verified_state: dict = field(default_factory=dict)  # What's been tested/verified
+    next_step: str = ""                     # Agent's planned next action
+```
+
+Updated after each turn, carried across compaction as structured metadata (not in message history). Injected into system prompt so agent maintains continuity even after context compression.
+
+#### GAP-10: Fact Extraction Engine (OpenHarness)
+
+Auto-discover environment facts from conversation and inject into USER.md:
+
+```python
+FACT_PATTERNS = {
+    "ssh_host": r"ssh\s+[\w@.-]+",
+    "ip_address": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+    "api_endpoint": r"https?://[\w.-]+(?:/[\w.-]*)*",
+    "conda_env": r"conda activate (\w+)",
+    "python_version": r"python(\d+\.\d+)",
+    "git_remote": r"git@[\w.-]+:[\w/.-]+\.git",
+    "env_var": r"export (\w+)=",
+    "data_path": r"(?:/[\w.-]+){3,}",
+}
+```
+
+Each match gets a confidence score. Deduplicated by key. Merged into USER.md during Dream process. Means the agent learns about the user's environment automatically.
+
+#### GAP-11: Provider-Aware Token Counting (nanobot)
+
+Replace the "4 chars per token" heuristic with actual provider tokenizers:
+
+```python
+async def estimate_tokens(messages: list, provider: str) -> int:
+    """Use provider's actual tokenizer when available, fall back to heuristic."""
+    if provider == "anthropic":
+        return await anthropic_client.count_tokens(messages)  # Exact
+    elif provider == "openai":
+        import tiktoken
+        enc = tiktoken.encoding_for_model(model)
+        return sum(len(enc.encode(m.content)) for m in messages)
+    else:
+        return sum(len(m.content) for m in messages) // 4  # Fallback heuristic
+```
+
+Use exact counting for threshold decisions (compaction triggers, budget enforcement). Use heuristic only for display/estimation.
+
+#### GAP-12: Prompt Cache Optimization (nanobot)
+
+Optimize tool ordering for Anthropic prompt caching:
+
+```python
+def get_tool_definitions(tools: list[BaseTool]) -> list[dict]:
+    """Sort tools for cache-friendly ordering."""
+    builtin = sorted([t for t in tools if t.is_builtin], key=lambda t: t.name)
+    mcp = sorted([t for t in tools if t.is_mcp], key=lambda t: t.name)
+    dynamic = sorted([t for t in tools if t.is_dynamic], key=lambda t: t.name)
+    return [t.schema() for t in builtin + mcp + dynamic]
+```
+
+Stable tool ordering means the tool definitions prefix is the same across requests, maximizing cache hits. Track cache metrics:
+- `cached_tokens` per request
+- Cache hit rate per session
+- Break-even analysis (is caching saving money?)
+
+---
+
+### 26.4 Agent Loop & Error Recovery
+
+#### GAP-13: Runner-Level Error Recovery (nanobot)
+
+Beyond provider retries (Section 5.3), the agent runner needs its own recovery layer:
+
+| Recovery | Trigger | Action | Limit |
+|----------|---------|--------|-------|
+| Empty response | LLM returns blank/only-thinking | Retry with nudge message | 2 retries |
+| Length recovery | Response suspiciously short | Inject "please continue" | 3 recoveries |
+| Injection cycling | Tool result injection fails | Re-inject with simplified result | 3 per turn, 5 total |
+| Tool result truncation | Tool output exceeds limit | Truncate with "[result truncated]" | 1024-byte safety buffer |
+| Microcompact | Tool results bloating context | Summarize old tool results, keep recent 10 | On demand |
+
+```python
+_MAX_EMPTY_RETRIES = 2
+_MAX_LENGTH_RECOVERIES = 3
+_MAX_INJECTIONS_PER_TURN = 3
+_MAX_INJECTION_CYCLES = 5
+_MICROCOMPACT_KEEP_RECENT = 10
+```
+
+#### GAP-14: Reactive Compaction (OpenHarness)
+
+When a prompt-too-long error occurs (not caught by threshold-based compaction):
+
+1. Catch `PromptTooLongError` or HTTP 400 with "prompt is too long"
+2. Trigger emergency compaction (more aggressive than threshold-based)
+3. Retry the same request after compaction
+4. If compaction fails 3 times consecutively, abort with error
+
+```python
+_MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3
+
+async def submit_with_reactive_compact(messages, ...):
+    for attempt in range(MAX_RETRIES):
+        try:
+            return await llm.ainvoke(messages)
+        except PromptTooLongError:
+            if compact_failures >= _MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+                raise
+            messages = await emergency_compact(messages)
+            compact_failures += 1
+```
+
+#### GAP-15: File State Tracking (nanobot)
+
+Track read/edit history to prevent common agent mistakes:
+
+```python
+@dataclass
+class ReadState:
+    mtime: float          # File modification time when last read
+    content_hash: str     # SHA256 of content when read
+    offset: int           # Line offset of read
+    limit: int            # Lines read
+
+class FileStateTracker:
+    _states: dict[str, ReadState] = {}
+    
+    def record_read(self, path: str, content: str) -> None: ...
+    
+    def check_before_edit(self, path: str) -> str | None:
+        """Returns warning if file not read or stale, None if OK."""
+        if path not in self._states:
+            return f"Warning: {path} has not been read yet. Read before editing."
+        state = self._states[path]
+        current_mtime = os.path.getmtime(path)
+        if current_mtime != state.mtime:
+            current_hash = hash_file(path)
+            if current_hash != state.content_hash:
+                return f"Warning: {path} was modified since last read. Re-read before editing."
+        return None  # Safe to edit
+```
+
+Inject warnings into tool results so the LLM knows to re-read.
+
+#### GAP-16: Recovery Recipes (claw-code)
+
+Encode known failure-to-recovery mappings for smarter auto-recovery:
+
+```python
+RECOVERY_RECIPES = {
+    "stale_branch": {
+        "detection": lambda e: "merge conflict" in str(e) or "behind main" in str(e),
+        "recovery": "git fetch origin && git rebase origin/main",
+        "escalation": "reassign to fresh worktree",
+    },
+    "mcp_startup": {
+        "detection": lambda e: "MCP server" in str(e) and "connection refused" in str(e),
+        "recovery": "restart MCP server, retry tool call",
+        "escalation": "disable MCP server, continue without it",
+    },
+    "compile_error": {
+        "detection": lambda e: "SyntaxError" in str(e) or "ModuleNotFoundError" in str(e),
+        "recovery": "inject error context, ask agent to fix",
+        "escalation": "escalate to higher tier",
+    },
+    "test_failure": {
+        "detection": lambda e: "FAILED" in str(e) and "test" in str(e).lower(),
+        "recovery": "inject test output, ask agent to fix",
+        "escalation": "escalate to higher tier with full test context",
+    },
+}
+```
+
+Match failure to recipe before falling through to the generic retry→escalate→reassign→abort chain.
+
+---
+
+### 26.5 Permission & Security
+
+#### GAP-17: Bash Validation Submodules (claw-code)
+
+Replace simple command allowlist with semantic command analysis:
+
+```python
+class BashValidator:
+    """Multi-stage validation for shell commands."""
+    
+    validators = [
+        DestructiveCommandDetector(),   # rm -rf, git reset --hard, DROP TABLE
+        ReadOnlyGatekeeper(),           # In plan mode, only allow read-only commands
+        SedValidator(),                 # Validate sed expressions for safety
+        PathValidator(),                # Check paths are within workspace
+        PipeChainAnalyzer(),            # Analyze piped commands (curl | bash)
+        EnvironmentModifier(),          # Detect export, unset, source
+        NetworkAccessDetector(),        # Detect curl, wget, ssh
+        PackageManagerDetector(),       # Detect pip install, npm install
+    ]
+    
+    def validate(self, command: str, mode: PermissionMode) -> ValidationResult:
+        """Run all validators, return aggregate result."""
+        for v in self.validators:
+            result = v.check(command, mode)
+            if result.action == "deny":
+                return result
+            if result.action == "escalate":
+                return result  # Needs user approval
+        return ValidationResult(action="allow")
+```
+
+Each validator classifies the command semantically, not just by keyword matching.
+
+#### GAP-18: Workspace-Root Binding (claw-code)
+
+Sessions store explicit workspace root to prevent cross-CWD contamination:
+
+```python
+@dataclass  
+class SessionMetadata:
+    session_id: str
+    thread_id: str
+    workspace_root: str  # Absolute path, validated at session creation
+    created_at: float
+    
+    def validate_path(self, path: str) -> bool:
+        """Ensure path is within this session's workspace."""
+        return os.path.realpath(path).startswith(self.workspace_root)
+```
+
+Prevents phantom bugs when multiple agents/sessions operate on different directories.
+
+---
+
+### 26.6 MCP & Tool Integration
+
+#### GAP-19: Degraded-Mode MCP Reporting (claw-code)
+
+MCP startup should report partial success instead of all-or-nothing:
+
+```python
+@dataclass
+class McpStartupReport:
+    total_servers: int
+    ready: list[str]           # Servers that initialized successfully
+    failed: list[tuple[str, str]]  # (server_name, error_message)
+    degraded: bool             # True if some servers failed
+    
+    @property
+    def summary(self) -> str:
+        if not self.failed:
+            return f"All {self.total_servers} MCP servers ready"
+        return (f"{len(self.ready)}/{self.total_servers} MCP servers ready. "
+                f"Failed: {', '.join(n for n, _ in self.failed)}")
+```
+
+Agent is informed which MCP tools are unavailable so it can work around missing servers.
+
+#### GAP-20: MCP Schema Normalization (nanobot)
+
+MCP tools return JSON Schema that may not be OpenAI-compatible. Normalize:
+
+```python
+def normalize_mcp_schema(schema: dict) -> dict:
+    """Normalize MCP JSON Schema for LangChain/OpenAI compatibility."""
+    # Handle nullable unions: {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    if "anyOf" in schema:
+        non_null = [s for s in schema["anyOf"] if s.get("type") != "null"]
+        if len(non_null) == 1:
+            return {**non_null[0], "nullable": True}
+    # Recursively normalize properties
+    if "properties" in schema:
+        schema["properties"] = {
+            k: normalize_mcp_schema(v) for k, v in schema["properties"].items()
+        }
+    return schema
+```
+
+Tool naming convention: `mcp_{server_name}_{tool_name}` to avoid collisions.
+
+#### GAP-21: LSP Integration (OpenHarness)
+
+Language Server Protocol for code intelligence — enables go-to-definition, hover, completions:
+
+```python
+@tool
+async def lsp(
+    action: str,       # "symbols" | "references" | "definition" | "hover" | "diagnostics"
+    file: str,
+    line: int = 0,
+    character: int = 0,
+    query: str = "",
+) -> str:
+    """Query Language Server for code intelligence."""
+```
+
+Phase: P3 (nice-to-have for code-heavy swarm tasks). Requires LSP servers installed in Docker image.
+
+---
+
+### 26.7 Scheduling & Background Tasks
+
+#### GAP-22: Heartbeat Service (nanobot)
+
+Distinct from sub-agent health monitoring. A periodic "should I wake up?" decision:
+
+```python
+class HeartbeatService:
+    """Periodic service that wakes the agent to check on tasks."""
+    interval: int = 1800  # 30 minutes default
+    
+    async def tick(self):
+        # Phase 1: Decision (lightweight LLM call with virtual tool)
+        decision = await llm.ainvoke(
+            system=HEARTBEAT_PROMPT,  # Loaded from HEARTBEAT.md
+            tools=[heartbeat_virtual_tool],  # Returns {"action": "skip"|"run", "tasks": "..."}
+        )
+        if decision.action == "skip":
+            return
+        
+        # Phase 2: Execution (full agent invocation)
+        await agent.ainvoke({"messages": [{"role": "user", "content": decision.tasks}]})
+```
+
+Uses a virtual tool (not a real tool — just structured output) to decide whether to act. Prevents wasting tokens on "nothing to do" heartbeats.
+
+#### GAP-23: Notification Evaluator (nanobot)
+
+When a scheduled task or heartbeat produces a result, decide whether to deliver it:
+
+```python
+async def evaluate_notification(task_result: str, user_context: str) -> bool:
+    """LLM decides whether this result is worth notifying the user about."""
+    response = await lite_llm.ainvoke(
+        system="You are a notification filter. Decide if this result is important enough to notify the user.",
+        tools=[evaluate_tool],  # Returns {"should_notify": bool, "reason": "..."}
+        messages=[{"role": "user", "content": f"Task result: {task_result}\nUser context: {user_context}"}],
+    )
+    return response.should_notify  # Default: True on error
+```
+
+Uses lite tier to minimize cost. Prevents spam from routine cron jobs that find nothing interesting.
+
+#### GAP-24: Cron Job History & State Machine (nanobot)
+
+Enrich the scheduler with execution history and job states:
+
+```python
+@dataclass
+class CronJob:
+    id: str
+    schedule: str                    # Cron expression
+    prompt: str                      # What to execute
+    state: CronJobState              # enabled | disabled | paused
+    timezone: str                    # IANA timezone
+    run_history: list[CronRun]       # Last 20 runs
+    created_at: str
+    last_run_at: str | None
+    run_count: int
+
+@dataclass
+class CronRun:
+    started_at: str
+    finished_at: str
+    duration_ms: int
+    status: str                      # "success" | "failure" | "timeout"
+    result_summary: str              # Truncated output
+```
+
+History enables: "Show me the last 5 runs of my portfolio check" and debugging failed scheduled tasks.
+
+#### GAP-25: Auto-Compact for Idle Sessions (nanobot)
+
+Sessions that haven't been used for a configurable TTL get auto-compacted:
+
+```yaml
+session:
+  ttl_minutes: 120  # Auto-compact after 2 hours idle (0 = disabled)
+```
+
+Keeps recent 8 messages, archives the rest to history.jsonl. Prevents unbounded memory growth from abandoned sessions.
+
+---
+
+### 26.8 Streaming & Communication
+
+#### GAP-26: Message Throttling & Aggregation (ClawTeam)
+
+Prevent noisy sub-agents from flooding the master:
+
+```python
+class MessageThrottler:
+    """Per-source/target pair throttling with priority support."""
+    default_window: float = 30.0  # seconds
+    
+    priorities = {"urgent": 0, "high": 5, "medium": 15, "low": 30}  # min interval per priority
+    
+    async def should_deliver(self, source: str, target: str, priority: str) -> bool:
+        key = f"{source}→{target}"
+        min_interval = self.priorities.get(priority, self.default_window)
+        elapsed = time.time() - self._last_delivery.get(key, 0)
+        if elapsed >= min_interval:
+            self._last_delivery[key] = time.time()
+            return True
+        # Buffer the message for batch delivery later
+        self._pending[key].append(message)
+        return False
+```
+
+Urgent messages bypass throttling. Low-priority messages are batched and delivered periodically.
+
+#### GAP-27: Thinking/Reasoning Content Storage (nanobot)
+
+Store structured thinking content from models that support it:
+
+```python
+@dataclass
+class AgentResponse:
+    content: str                                # Final text response
+    thinking_blocks: list[dict] | None = None   # Anthropic extended thinking
+    reasoning_content: str | None = None        # DeepSeek/Kimi/MiMo reasoning
+    tool_calls: list[ToolCall] = field(default_factory=list)
+```
+
+Thinking content is:
+- Stored in checkpoints for debugging
+- Optionally rendered to user (controlled by `streaming.show_thinking` config)
+- Excluded from context for next turn (unless model expects it back)
+
+#### GAP-28: Unified Session Mode (nanobot)
+
+One conversation shared across all channels for single-user power users:
+
+```yaml
+session:
+  unified: false  # When true, all channels share one session
+```
+
+When enabled, thread_id is always `unified:default` regardless of channel. User types in Telegram, continues on CLI, checks status via API — all in the same conversation.
+
+---
+
+### 26.9 Plugin & Hook System
+
+#### GAP-29: Hook Execution Backends (OpenHarness)
+
+Hooks should support multiple execution backends, not just Python decorators:
+
+| Backend | Format | Use Case |
+|---------|--------|----------|
+| **Python** | `@hook("pre_tool_use")` decorator | In-process plugins |
+| **Shell** | Shell command with env vars (`HOOK_EVENT`, `HOOK_PAYLOAD`) | External scripts |
+| **HTTP** | POST to webhook URL with JSON payload | External services (Slack, PagerDuty) |
+| **LLM** | LLM-driven hook that reasons about the event | Adaptive behavior |
+
+Shell hooks receive event data via `LANGAGENT_HOOK_EVENT` and `LANGAGENT_HOOK_PAYLOAD` environment variables. Return code 0 = allow, 1 = deny.
+
+#### GAP-30: Hook Error Isolation (nanobot)
+
+Composite hook execution with error isolation:
+
+```python
+class CompositeHook:
+    hooks: list[AgentHook]
+    
+    async def before_iteration(self, state):
+        for hook in self.hooks:
+            try:
+                await hook.before_iteration(state)
+            except Exception as e:
+                logger.error(f"Hook {hook.__class__.__name__} failed: {e}")
+                # Continue — don't let one broken hook crash the agent
+    
+    async def finalize_content(self, content: str) -> str:
+        # Sequential, NO error isolation — bugs in finalizers should surface
+        for hook in self.hooks:
+            content = await hook.finalize_content(content)
+        return content
+```
+
+Error isolation for side-effect hooks (before/after). No isolation for content-transforming hooks (finalize).
+
+#### GAP-31: Plugin Manifest Schema (OpenHarness)
+
+Define the concrete plugin manifest format:
+
+```json
+{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "description": "What this plugin does",
+  "enabled_by_default": true,
+  "skills_dir": "./skills",
+  "hooks_file": "./hooks.py",
+  "commands": {
+    "mycommand": {
+      "description": "Does something",
+      "handler": "commands.my_handler",
+      "remote_invocable": false
+    }
+  },
+  "agents": {
+    "security-reviewer": {
+      "role": "evaluator",
+      "tier": "advanced",
+      "tools": ["read_file", "grep", "glob"],
+      "system_prompt_addon": "Focus on security..."
+    }
+  },
+  "mcp_servers": {}
+}
+```
+
+Discovery paths: `workspace/plugins/*/plugin.json` and `~/.langagent/plugins/*/plugin.json`.
+
+---
+
+### 26.10 Git & Code Quality
+
+#### GAP-32: Stale-Branch Detection (claw-code)
+
+Before running tests in the verify phase, check branch freshness:
+
+```python
+async def check_branch_freshness(worktree_path: str, base_branch: str = "main") -> BranchFreshness:
+    """Detect if branch is behind main."""
+    behind_count = git_rev_list_count(f"{base_branch}..HEAD", cwd=worktree_path)
+    ahead_count = git_rev_list_count(f"HEAD..{base_branch}", cwd=worktree_path)
+    
+    if behind_count > 0:
+        return BranchFreshness(
+            stale=True,
+            behind=behind_count,
+            action="rebase"  # or "merge-forward" or "skip"
+        )
+    return BranchFreshness(stale=False)
+```
+
+Prevents false-positive test failures caused by testing against a stale branch.
+
+---
+
+### 26.11 Testing & Observability
+
+#### GAP-33: Deterministic Mock Service (claw-code)
+
+Built-in mock LLM service for E2E testing without API keys:
+
+```python
+class MockLLMService:
+    """Anthropic-compatible mock for testing."""
+    scenarios: dict[str, list[MockResponse]]
+    
+    async def handle_request(self, request):
+        scenario = self.match_scenario(request)
+        return scenario.next_response()
+```
+
+Enables:
+- CI/CD without API keys
+- Deterministic test scenarios (same input → same output)
+- Edge case testing (token limits, error responses, tool call failures)
+- Coverage of all streaming event types
+
+#### GAP-34: Agent Color Assignment (OpenHarness)
+
+Visual differentiation for swarm dashboard and logs:
+
+```python
+AGENT_COLORS = [
+    "#FF6B6B",  # Red
+    "#4ECDC4",  # Teal
+    "#45B7D1",  # Blue
+    "#96CEB4",  # Green
+    "#FFEAA7",  # Yellow
+    "#DDA0DD",  # Plum
+    "#98D8C8",  # Mint
+    "#F7DC6F",  # Gold
+    "#BB8FCE",  # Purple
+    "#85C1E9",  # Sky
+]
+
+def assign_color(agent_index: int) -> str:
+    return AGENT_COLORS[agent_index % len(AGENT_COLORS)]
+```
+
+Colors assigned at spawn time, stored in agent metadata, used in:
+- Web UI agent cards
+- Terminal logs (ANSI colors)
+- Git commit messages (optional)
+
+---
+
+### 26.12 Deployment & Infrastructure
+
+#### GAP-35: Docker Sandbox for Tool Execution (OpenHarness)
+
+Separate from deployment Docker — run dangerous tools in isolated containers:
+
+```python
+class DockerSandboxSession:
+    """Run tool execution in a sandboxed Docker container."""
+    
+    async def execute(self, command: str, workspace: str) -> str:
+        container = await docker.run(
+            image=self.sandbox_image,
+            command=command,
+            volumes={workspace: {"bind": "/workspace", "mode": "rw"}},
+            network_mode="none",          # No network access
+            mem_limit="512m",             # Memory limit
+            cpu_quota=100000,             # 1 CPU
+            read_only=True,               # Read-only root filesystem
+            tmpfs={"/tmp": "size=100m"},  # Writable temp
+        )
+        return container.output
+```
+
+Phase: P3. For untrusted code execution (user-uploaded scripts, npm install, etc.).
+
+---
+
+### 26.13 Summary — All 35 Gaps by Priority
+
+| Priority | Gap # | Feature | Source |
+|----------|-------|---------|--------|
+| CRITICAL | 1 | Context recovery for re-spawns | ClawTeam |
+| CRITICAL | 2 | Worker state machine | claw-code |
+| CRITICAL | 5 | Phase gates | ClawTeam |
+| CRITICAL | 8 | Dream Phase 1/2 separation | nanobot |
+| CRITICAL | 13 | Runner-level error recovery | nanobot |
+| CRITICAL | 14 | Reactive compaction | OpenHarness |
+| CRITICAL | 6 | Git conflict detection | ClawTeam |
+| HIGH | 9 | Task focus state tracking | OpenHarness |
+| HIGH | 10 | Fact extraction engine | OpenHarness |
+| HIGH | 16 | Recovery recipes | claw-code |
+| HIGH | 17 | Bash validation submodules | claw-code |
+| HIGH | 15 | File state tracking | nanobot |
+| HIGH | 22 | Heartbeat service | nanobot |
+| HIGH | 23 | Notification evaluator | nanobot |
+| HIGH | 3 | Graceful shutdown protocol | ClawTeam |
+| HIGH | 26 | Message throttling | ClawTeam |
+| HIGH | 24 | Full-team snapshots | ClawTeam |
+| HIGH | 11 | Provider-aware token counting | nanobot |
+| HIGH | 12 | Prompt cache optimization | nanobot |
+| MEDIUM | 29 | Hook execution backends | OpenHarness |
+| MEDIUM | 31 | Plugin manifest schema | OpenHarness |
+| MEDIUM | 35 | Docker sandbox for tools | OpenHarness |
+| MEDIUM | 4 | Dead agent + task rebalancing | ClawTeam |
+| MEDIUM | 19 | Degraded-mode MCP | claw-code |
+| MEDIUM | 32 | Stale-branch detection | claw-code |
+| MEDIUM | 7 | Green-level contracts | claw-code |
+| MEDIUM | 33 | Deterministic mock service | claw-code |
+| MEDIUM | 28 | Unified session mode | nanobot |
+| MEDIUM | 34 | Agent color assignment | OpenHarness |
+| MEDIUM | 21 | LSP integration | OpenHarness |
+| MEDIUM | 25 | Auto-compact idle sessions | nanobot |
+| MEDIUM | 24 | Cron job history + state machine | nanobot |
+| MEDIUM | 20 | MCP schema normalization | nanobot |
+| MEDIUM | 27 | Thinking/reasoning storage | nanobot |
+| MEDIUM | 30 | Hook error isolation | nanobot |
+| LOW | 18 | Workspace-root binding | claw-code |
+
+---
+
+## 27. Non-Functional Requirements
+
+### 27.1 Performance
 
 | Metric | Target |
 |--------|--------|
@@ -1892,7 +2745,7 @@ lang-agent-platform/
 | Memory footprint | < 512MB idle, < 1GB active |
 | Startup time | < 5s (Docker container ready) |
 
-### 26.2 Reliability
+### 27.2 Reliability
 
 | Requirement | Implementation |
 |-------------|----------------|
@@ -1903,7 +2756,7 @@ lang-agent-platform/
 | Task persistence | JSON + asyncio.Lock, survives restarts |
 | Memory durability | Git-versioned Dream with restore |
 
-### 26.3 Security
+### 27.3 Security
 
 | Requirement | Implementation |
 |-------------|----------------|
@@ -1916,7 +2769,7 @@ lang-agent-platform/
 | Docker non-root | uid 1000, no privileged mode |
 | Budget limits | Per-agent and per-session cost caps |
 
-### 26.4 Extensibility
+### 27.4 Extensibility
 
 | Extension Point | Mechanism |
 |-----------------|-----------|
@@ -1931,7 +2784,7 @@ lang-agent-platform/
 | New hook | `@hook("event_name")` decorator |
 | New agent archetype | `@agent_archetype("name")` decorator |
 
-### 26.5 Testing
+### 27.5 Testing
 
 | Level | Coverage | Tools |
 |-------|----------|-------|
