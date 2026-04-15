@@ -1,0 +1,29 @@
+services:
+  agent-gateway:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./workspace:/app/workspace
+      - ./data:/app/data
+      - ./skills:/app/workspace/skills
+      - ./config.yaml:/app/config.yaml:ro
+      - ./config.local.yaml:/app/config.local.yaml:ro
+
+  agent-api:
+    build: .
+    command: ["python", "-m", "src.main"]
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8900:8900"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./workspace:/app/workspace
+      - ./data:/app/data
+      - ./skills:/app/workspace/skills
+      - ./config.yaml:/app/config.yaml:ro
+      - ./config.local.yaml:/app/config.local.yaml:ro
