@@ -128,8 +128,21 @@ class TelegramChannelConfig(BaseModel):
         return v
 
 
+class CLIConfig(BaseModel):
+    enabled: bool = False
+    user_id: str = "cli_user"
+
+
+class APIConfig(BaseModel):
+    enabled: bool = True
+    host: str = "0.0.0.0"
+    port: int = 8900
+
+
 class ChannelsConfig(BaseModel):
     telegram: TelegramChannelConfig = Field(default_factory=TelegramChannelConfig)
+    cli: CLIConfig = Field(default_factory=CLIConfig)
+    api: APIConfig = Field(default_factory=APIConfig)
 
 
 class SchedulerConfig(BaseModel):

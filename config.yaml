@@ -48,6 +48,13 @@ channels:
     token: "${TELEGRAM_BOT_TOKEN}"
     trigger: "@Ciana"
     allowed_users: []            # Empty = allow all
+  cli:
+    enabled: false
+    user_id: "cli_user"
+  api:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8900
 
 scheduler:
   enabled: true
