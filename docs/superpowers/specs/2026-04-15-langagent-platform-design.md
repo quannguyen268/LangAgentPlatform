@@ -27,12 +27,13 @@
 17. [Plugin & Hook System](#17-plugin--hook-system)
 18. [MCP Support](#18-mcp-support)
 19. [Multi-User Architecture](#19-multi-user-architecture)
-20. [Observability & Cost Tracking](#20-observability--cost-tracking)
-21. [Configuration](#21-configuration)
-22. [Docker Deployment](#22-docker-deployment)
-23. [Project Structure](#23-project-structure)
-24. [Phased Roadmap](#24-phased-roadmap)
-25. [Non-Functional Requirements](#25-non-functional-requirements)
+20. [Web UI (Management Dashboard)](#20-web-ui)
+21. [Observability & Cost Tracking](#21-observability--cost-tracking)
+22. [Configuration](#22-configuration)
+23. [Docker Deployment](#23-docker-deployment)
+24. [Project Structure](#24-project-structure)
+25. [Phased Roadmap](#25-phased-roadmap)
+26. [Non-Functional Requirements](#26-non-functional-requirements)
 
 ---
 
@@ -71,6 +72,7 @@ Decisions made during design review, with rationale:
 | AD-10 | **Per-user sessions, shared agent identity** — per-user USER.md, shared SOUL/AGENT/MEMORY. | One agent personality, but personalized per user. Session isolation already exists via thread_id. |
 | AD-11 | **Heartbeat folded into sub-agent health monitoring** — BaseStore timestamps, not a separate feature. | Simpler architecture, heartbeat is just one aspect of health monitoring. |
 | AD-12 | **3-layer failure detection + priority chain recovery** for sub-agents — heartbeat + timeout + iteration limit → retry → escalate → reassign → abort. | Defense in depth. No single detection covers all failure modes. |
+| AD-13 | **Web UI + Chat channels** — Chat (Telegram, Discord, CLI) for conversation; Web UI for management (swarm dashboard, config, cost). Not blocking core platform. | Best of both: chat on-the-go, dashboard at desk. Web UI is Phase 2, doesn't block Phase 0-1. |
 
 ---
 
@@ -1251,9 +1253,188 @@ Dream runs per-user:
 
 ---
 
-## 20. Observability & Cost Tracking
+## 20. Web UI (Management Dashboard)
 
-### 20.1 Tracing
+### 23.1 Design Philosophy
+
+Two interaction modes, each optimized for its context:
+
+| Mode | Interface | Best For |
+|------|-----------|----------|
+| **Conversational** | Telegram, Discord, Slack, CLI | Quick tasks, questions, on-the-go interaction, notifications |
+| **Management** | Web UI dashboard | Swarm monitoring, agent config, task boards, cost analysis, memory editing |
+
+The Web UI is **not** a chat replacement — it's a management console. Users chat via their preferred channel, then open the dashboard when they need visibility or control over complex operations.
+
+### 23.2 Architecture
+
+```
+┌──────────────────────────────────────────────────┐
+│                   WEB UI (React)                  │
+│  Next.js / Vite │ TailwindCSS │ shadcn/ui        │
+│                                                   │
+│  ┌─────────┐ ┌──────────┐ ┌───────────────────┐  │
+│  │  Chat   │ │  Swarm   │ │  Settings &       │  │
+│  │  Panel  │ │  Board   │ │  Management       │  │
+│  └────┬────┘ └────┬─────┘ └────────┬──────────┘  │
+│       └───────────┴────────────────┘              │
+│                    │                              │
+│              WebSocket + REST                     │
+└────────────────────┬─────────────────────────────┘
+                     │
+┌────────────────────▼─────────────────────────────┐
+│         AGENT API (OpenAI-compatible + extensions) │
+│  /v1/chat/completions (SSE)                       │
+│  /v1/agents          (sub-agent management)       │
+│  /v1/tasks           (scheduled tasks)            │
+│  /v1/memory          (read/edit memory files)     │
+│  /v1/config          (runtime configuration)      │
+│  /v1/cost            (usage & cost data)          │
+│  /ws                 (real-time stream events)    │
+└───────────────────────────────────────────────────┘
+```
+
+The API server (already in spec as the OpenAI-compatible API channel) is extended with management endpoints. The Web UI is a static frontend that talks to this API.
+
+### 23.3 Pages & Features
+
+#### Chat Panel
+- Real-time conversation with the agent (via WebSocket)
+- Streaming token display
+- Tool call visualization (expandable cards)
+- Sub-agent activity feed (live progress)
+- Approval dialogs rendered inline (approve/deny buttons)
+- Session picker (switch between conversations)
+- User selector (for multi-user setups)
+
+#### Swarm Dashboard
+- **Agent cards** — each sub-agent as a card showing: name, role, tier, status, current task, cost, health indicator
+- **Task board** — Kanban-style: pending → in_progress → completed/failed. Drag to reassign.
+- **Team view** — agents grouped by team, with harness phase indicator (plan → execute → verify → ship)
+- **Live logs** — real-time stream of agent events (tool calls, messages, errors)
+- **Cost chart** — per-agent and per-tier cost over time (line chart)
+- **Git activity** — commits per agent worktree (simple list, not Gource)
+
+#### Settings & Management
+- **Memory editor** — view and edit SOUL.md, USER.md, MEMORY.md, AGENT.md with live preview
+- **AGENT_REGISTRY.md** and **TEAM_PLAYBOOK.md** — view learned configurations
+- **Skills browser** — installed skills with enable/disable toggles, requirements status
+- **Plugin manager** — installed plugins with hook event list
+- **MCP servers** — connection status, available tools per server
+- **Gateway bridges** — status, recent calls, error log
+- **Scheduled tasks** — list, create, edit, delete with cron preview
+- **Configuration** — edit config.yaml sections (provider, tiers, channels, permissions)
+- **Cost report** — per-user, per-tier, per-agent breakdown with date range filter
+- **Dream log** — history of memory changes with Git diff view and restore button
+
+### 23.4 Real-Time Updates
+
+The Web UI subscribes to the same `StreamEvent` system defined in Section 6:
+
+```
+WebSocket connection: ws://localhost:8900/ws?token=...
+
+→ Receives all StreamEvents in real-time:
+  - token deltas (chat panel)
+  - tool_call_start/end (tool visualization)
+  - agent_spawn/progress/complete/failed (swarm dashboard)
+  - cost_update (cost chart)
+  - approval_request (inline dialog)
+```
+
+No polling. All updates are push-based via WebSocket.
+
+### 23.5 Technology Stack
+
+| Component | Technology | Rationale |
+|-----------|-----------|-----------|
+| Framework | Next.js or Vite + React | Fast, modern, good DX |
+| Styling | TailwindCSS + shadcn/ui | Clean, consistent, fast to build |
+| State | Zustand or TanStack Query | Lightweight, WebSocket-friendly |
+| Charts | Recharts | Simple cost/usage visualization |
+| Real-time | Native WebSocket | Already have the SSE/WS API |
+| Markdown | react-markdown | For memory file preview |
+| Code editor | Monaco (lightweight) | For editing YAML config and .md files |
+
+### 23.6 API Extensions
+
+The OpenAI-compatible API channel (Section 11) is extended with management endpoints:
+
+```
+# Chat (existing)
+POST   /v1/chat/completions          # Send message, receive SSE stream
+GET    /v1/models                     # List available models/tiers
+
+# Sub-Agent Management (new)
+GET    /v1/agents                     # List all active sub-agents
+GET    /v1/agents/{id}                # Get agent details
+POST   /v1/agents                     # Spawn agent (same as spawn_agent tool)
+DELETE /v1/agents/{id}                # Recall agent
+PATCH  /v1/agents/{id}                # Modify agent (tier, tools, skills)
+GET    /v1/agents/{id}/logs           # Stream agent events
+
+# Teams (new)
+GET    /v1/teams                      # List active teams
+POST   /v1/teams                      # Create team from template
+DELETE /v1/teams/{id}                 # Dissolve team
+GET    /v1/teams/{id}/board           # Get task board state
+
+# Scheduled Tasks (new)
+GET    /v1/tasks                      # List scheduled tasks
+POST   /v1/tasks                      # Create task
+DELETE /v1/tasks/{id}                 # Cancel task
+GET    /v1/tasks/{id}/history         # Run history
+
+# Memory (new)
+GET    /v1/memory                     # List memory files
+GET    /v1/memory/{filename}          # Read file content
+PUT    /v1/memory/{filename}          # Update file content
+GET    /v1/memory/dream/log           # Dream change history
+POST   /v1/memory/dream/restore/{sha} # Restore to previous state
+
+# Config (new)
+GET    /v1/config                     # Get current config (redacted secrets)
+PATCH  /v1/config                     # Update config sections
+
+# Cost (new)
+GET    /v1/cost                       # Cost summary
+GET    /v1/cost/breakdown             # Per-user, per-tier, per-agent
+
+# WebSocket (new)
+WS     /ws                            # Real-time StreamEvent subscription
+```
+
+### 23.7 Authentication
+
+Web UI authenticates via a static token (for personal use) or JWT (for multi-user):
+
+```yaml
+api:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8900
+  auth:
+    type: "token"                # "token" | "jwt"
+    token: "${API_TOKEN}"        # For token auth
+    jwt_secret: "${JWT_SECRET}"  # For JWT auth
+```
+
+### 23.8 Phase Delivery
+
+| Phase | Deliverable |
+|-------|-------------|
+| Phase 0 | API channel (OpenAI-compatible, chat only) |
+| Phase 1 | Management API extensions (agents, tasks, memory, cost endpoints) |
+| Phase 2 | Web UI v1: Chat panel + Swarm dashboard + Settings |
+| Phase 3 | Web UI v2: Polish, cost charts, Dream log viewer, team templates UI |
+
+The Web UI does **not** block core platform development. Phases 0-1 are fully functional via chat channels. The Web UI lands in Phase 2 as a management add-on.
+
+---
+
+## 21. Observability & Cost Tracking
+
+### 23.1 Tracing
 
 ```yaml
 observability:
@@ -1270,7 +1451,7 @@ observability:
 
 LangGraph natively emits trace events. Both LangSmith and langfuse are supported as backends.
 
-### 20.2 Cost Tracking
+### 23.2 Cost Tracking
 
 | Granularity | Tracked |
 |-------------|---------|
@@ -1290,7 +1471,7 @@ cost:
     groq/llama-3.3-70b:          { input: 0.59, output: 0.79 }
 ```
 
-### 20.3 Metrics
+### 23.3 Metrics
 
 - Token usage per request
 - Tool execution duration and success rate
@@ -1299,7 +1480,7 @@ cost:
 - Context compression frequency
 - Dream process duration and changes
 
-### 20.4 Session Logging
+### 23.4 Session Logging
 
 Every message logged to `workspace/sessions/{thread_id}.jsonl`:
 ```json
@@ -1310,9 +1491,9 @@ Every message logged to `workspace/sessions/{thread_id}.jsonl`:
 
 ---
 
-## 21. Configuration
+## 22. Configuration
 
-### 21.1 Single YAML File
+### 23.1 Single YAML File
 
 ```yaml
 # config.yaml — all settings in one file
@@ -1395,15 +1576,15 @@ avatar:
   tier: "lite"
 ```
 
-### 21.2 Local Overrides
+### 23.2 Local Overrides
 
 `config.local.yaml` (gitignored) overrides any key in `config.yaml`. Environment variables expand via `${VAR}` syntax. Pydantic v2 validates all config at startup.
 
 ---
 
-## 22. Docker Deployment
+## 23. Docker Deployment
 
-### 22.1 Services
+### 23.1 Services
 
 ```yaml
 # docker-compose.yml
@@ -1429,9 +1610,19 @@ services:
       - ./data:/app/data
     env_file: .env
     restart: unless-stopped
+
+  web-ui:                          # Management dashboard (Phase 2+)
+    build:
+      context: ./web
+    ports: ["3000:3000"]
+    environment:
+      - API_URL=http://agent-api:8900
+    depends_on:
+      - agent-api
+    restart: unless-stopped
 ```
 
-### 22.2 Dockerfile
+### 23.2 Dockerfile
 
 - Base: `python:3.13-slim`
 - System deps: curl, jq, ffmpeg, poppler-utils
@@ -1439,7 +1630,7 @@ services:
 - Health check: SQLite connectivity
 - Multi-stage build for minimal image size
 
-### 22.3 One-Command Install
+### 23.3 One-Command Install
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/.../install.sh | bash
@@ -1449,7 +1640,7 @@ The installer: checks prerequisites, clones repo, prompts for API keys, writes .
 
 ---
 
-## 23. Project Structure
+## 24. Project Structure
 
 ```
 lang-agent-platform/
@@ -1580,6 +1771,19 @@ lang-agent-platform/
 │   ├── research.toml
 │   └── hedge-fund.toml
 │
+├── web/                          # Web UI (management dashboard)
+│   ├── src/
+│   │   ├── app/                  # Next.js pages / Vite routes
+│   │   │   ├── chat/             # Chat panel
+│   │   │   ├── swarm/            # Swarm dashboard + task board
+│   │   │   ├── settings/         # Memory editor, skills, plugins, config
+│   │   │   └── cost/             # Cost reports
+│   │   ├── components/           # Shared UI components
+│   │   ├── hooks/                # WebSocket subscription, API calls
+│   │   └── lib/                  # API client, types, utils
+│   ├── package.json
+│   └── tailwind.config.ts
+│
 ├── config.yaml
 ├── config.local.yaml
 ├── docker-compose.yml
@@ -1591,7 +1795,7 @@ lang-agent-platform/
 
 ---
 
-## 24. Phased Roadmap
+## 25. Phased Roadmap
 
 ### Phase 0 — Fork & Foundation (Week 1)
 
@@ -1631,8 +1835,10 @@ lang-agent-platform/
 | Per-user session isolation (multi-user) | New |
 | Cost tracking (per-tier, per-agent, per-user) | ClawTeam/OpenHarness |
 | Additional providers (OpenAI, Gemini, Groq, Ollama) | nanobot |
+| Management API extensions (/v1/agents, /v1/tasks, /v1/memory, /v1/cost) | New |
+| WebSocket event stream endpoint (/ws) | New |
 
-**Exit criteria:** Agent can spawn sub-agents, manage them via tools, dream to consolidate memory, enforce permissions with user approval, track costs per user.
+**Exit criteria:** Agent can spawn sub-agents, manage them via tools, dream to consolidate memory, enforce permissions with user approval, track costs per user. Management API operational for future Web UI.
 
 ### Phase 2 — Swarm & Channels (Weeks 5-7)
 
@@ -1650,13 +1856,16 @@ lang-agent-platform/
 | Slack channel | nanobot |
 | WebSocket channel | nanobot |
 | Voice transcription (inherited but verify) | ciana-parrot |
+| **Web UI v1** — Chat panel + Swarm dashboard + Settings | New |
+| Management API extensions (agents, tasks, memory, cost) | New |
 
-**Exit criteria:** Launch a 5-agent software dev team from template, complete a coding task autonomously. Three new channels working.
+**Exit criteria:** Launch a 5-agent software dev team from template, complete a coding task autonomously. Three new channels working. Web UI shows swarm activity in real-time.
 
 ### Phase 3 — Polish & Scale (Weeks 8+)
 
 | Deliverable | Notes |
 |-------------|-------|
+| **Web UI v2** — Cost charts, Dream log viewer, team templates UI | New |
 | Feishu, Matrix, WeChat channels | From nanobot patterns |
 | Email channel | IMAP/SMTP |
 | WhatsApp bridge | Node.js |
@@ -1670,9 +1879,9 @@ lang-agent-platform/
 
 ---
 
-## 25. Non-Functional Requirements
+## 26. Non-Functional Requirements
 
-### 25.1 Performance
+### 26.1 Performance
 
 | Metric | Target |
 |--------|--------|
@@ -1683,7 +1892,7 @@ lang-agent-platform/
 | Memory footprint | < 512MB idle, < 1GB active |
 | Startup time | < 5s (Docker container ready) |
 
-### 25.2 Reliability
+### 26.2 Reliability
 
 | Requirement | Implementation |
 |-------------|----------------|
@@ -1694,7 +1903,7 @@ lang-agent-platform/
 | Task persistence | JSON + asyncio.Lock, survives restarts |
 | Memory durability | Git-versioned Dream with restore |
 
-### 25.3 Security
+### 26.3 Security
 
 | Requirement | Implementation |
 |-------------|----------------|
@@ -1707,7 +1916,7 @@ lang-agent-platform/
 | Docker non-root | uid 1000, no privileged mode |
 | Budget limits | Per-agent and per-session cost caps |
 
-### 25.4 Extensibility
+### 26.4 Extensibility
 
 | Extension Point | Mechanism |
 |-----------------|-----------|
@@ -1722,7 +1931,7 @@ lang-agent-platform/
 | New hook | `@hook("event_name")` decorator |
 | New agent archetype | `@agent_archetype("name")` decorator |
 
-### 25.5 Testing
+### 26.5 Testing
 
 | Level | Coverage | Tools |
 |-------|----------|-------|
