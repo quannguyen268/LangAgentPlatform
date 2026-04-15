@@ -1,5 +1,5 @@
 services:
-  cianaparrot:
+  agent-gateway:
     build: .
     restart: unless-stopped
     env_file: .env
@@ -11,4 +11,19 @@ services:
       - ./skills:/app/workspace/skills
       - ./config.yaml:/app/config.yaml:ro
       - ./config.local.yaml:/app/config.local.yaml:ro
-      - ~/.claude/projects:/app/.claude-projects:ro  # Claude Code sessions (read-only)
+
+  agent-api:
+    build: .
+    command: ["python", "-m", "src.main"]
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8900:8900"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./workspace:/app/workspace
+      - ./data:/app/data
+      - ./skills:/app/workspace/skills
+      - ./config.yaml:/app/config.yaml:ro
+      - ./config.local.yaml:/app/config.local.yaml:ro
