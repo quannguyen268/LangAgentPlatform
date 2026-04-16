@@ -10,6 +10,7 @@ from typing import Callable, Coroutine, Optional
 from .agent_response import AgentResponse, extract_agent_response
 from .channels.base import IncomingMessage
 from .config import AppConfig, TelegramChannelConfig
+from .memory.context import build_memory_context
 from .store import JsonStore
 from .tools.cron import set_current_context
 
@@ -48,6 +49,9 @@ class MessageRouter:
         }
         # Ensure counters don't collide with existing checkpoint threads
         self._sync_counters_with_checkpoints(checkpointer)
+        # Load memory context once at startup (Phase 1B will inject it into the LLM call)
+        self._memory_context = build_memory_context(self._workspace)
+        logger.info("Memory context loaded: %d chars", len(self._memory_context))
 
     def _sync_counters_with_checkpoints(self, checkpointer) -> None:
         """Ensure session counters are higher than any existing checkpoint thread."""
