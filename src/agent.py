@@ -1,16 +1,15 @@
-"""Agent setup - creates DeepAgents agent with all middleware and tools."""
+"""Agent setup - creates LangAgent agent with all middleware and tools."""
 
 import logging
 from pathlib import Path
 
-from deepagents import create_deep_agent
-from .backend import WorkspaceShellBackend
 from langchain.chat_models import init_chat_model
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from . import middleware as _middleware  # noqa: F401 — patches skill YAML parser
 from .config import AppConfig
+from .core.graph import build_agent_graph
 from .tools.web import web_search, web_fetch, init_web_tools
 from .tools.cron import schedule_task, list_tasks, cancel_task, init_cron_tools
 from .tools.host import host_execute, init_host_tools
@@ -20,8 +19,8 @@ from .transcription import init_transcription
 logger = logging.getLogger(__name__)
 
 
-async def create_cianaparrot_agent(config: AppConfig):
-    """Create and return the main CianaParrot agent.
+async def create_agent(config: AppConfig):
+    """Create and return the main LangAgent agent.
 
     Returns:
         tuple: (agent, checkpointer, mcp_client_or_None)
@@ -60,22 +59,6 @@ async def create_cianaparrot_agent(config: AppConfig):
     # Workspace
     workspace = config.agent.workspace
     Path(workspace).mkdir(parents=True, exist_ok=True)
-
-    # Memory files (paths relative to workspace, resolved by FilesystemBackend)
-    memory_files = []
-    for fname in ["IDENTITY.md", "AGENT.md", "MEMORY.md"]:
-        fpath = Path(workspace, fname)
-        if fpath.exists():
-            memory_files.append(fname)
-            logger.info("Memory file loaded: %s", fpath)
-
-    # Skills directory (virtual path relative to workspace)
-    skills_dirs = []
-    if config.skills.enabled:
-        skills_path = Path(workspace, "skills")
-        skills_path.mkdir(parents=True, exist_ok=True)
-        skills_dirs.append("skills")
-        logger.info("Skills directory: %s (workspace-relative)", skills_path)
 
     # Custom tools
     custom_tools = [web_search, web_fetch, schedule_task, list_tasks, cancel_task]
@@ -143,21 +126,18 @@ async def create_cianaparrot_agent(config: AppConfig):
     checkpointer = AsyncSqliteSaver(conn)
     await checkpointer.setup()
 
-    # Create agent
+    # Create agent — explicit StateGraph
     all_tools = custom_tools + mcp_tools
 
-    agent = create_deep_agent(
+    graph = build_agent_graph(
         model=model,
-        memory=memory_files,
-        skills=skills_dirs if skills_dirs else None,
         tools=all_tools,
-        backend=WorkspaceShellBackend(root_dir=workspace, virtual_mode=True),
-        checkpointer=checkpointer,
     )
+    agent = graph.compile(checkpointer=checkpointer)
 
     logger.info(
-        "Agent created: %d custom tools, %d MCP tools, %d memory files, %d skill dirs",
-        len(custom_tools), len(mcp_tools), len(memory_files), len(skills_dirs),
+        "LangAgent created: %d custom tools, %d MCP tools",
+        len(custom_tools), len(mcp_tools),
     )
 
     return agent, checkpointer, mcp_client
