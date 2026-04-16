@@ -1,15 +1,22 @@
-"""Agent setup - creates LangAgent agent with all middleware and tools."""
+"""Agent setup — creates LangAgent agent using DeepAgents + LangChain middleware.
+
+Architecture decision AD-14: Use create_deep_agent() with composable middleware
+instead of a hand-built StateGraph. DeepAgents provides the graph, tools (filesystem,
+todo, subagents), skills, memory, and backend. We add custom tools (web, cron,
+gateway, model router) and middleware (retry, limits, summarization, context editing).
+"""
 
 import logging
 from pathlib import Path
 
+from deepagents import create_deep_agent
+from deepagents.backends import FilesystemBackend
 from langchain.chat_models import init_chat_model
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from . import middleware as _middleware  # noqa: F401 — patches skill YAML parser
 from .config import AppConfig
-from .core.graph import build_agent_graph
 from .tools.web import web_search, web_fetch, init_web_tools
 from .tools.cron import schedule_task, list_tasks, cancel_task, init_cron_tools
 from .tools.host import host_execute, init_host_tools
@@ -19,8 +26,114 @@ from .transcription import init_transcription
 logger = logging.getLogger(__name__)
 
 
+def _build_interrupt_on(config: AppConfig) -> dict | None:
+    """Build the interrupt_on dict based on permission mode.
+
+    - "default": write tools require approval, read tools don't
+    - "auto": no interrupts (None)
+    - "plan": write tools excluded from tool list entirely (handled elsewhere)
+    """
+    mode = getattr(config, "permissions", None)
+    mode = mode.mode if mode else "default"
+
+    if mode == "auto":
+        return None  # No interrupts
+
+    if mode == "plan":
+        return None  # Plan mode handled by excluding write tools
+
+    # Default mode: ask for write tools, allow read tools
+    return {
+        "exec": True,
+        "host_execute": True,
+        "write_file": {"allowed_decisions": ["approve", "edit", "reject"]},
+        "edit_file": {"allowed_decisions": ["approve", "edit", "reject"]},
+        "schedule_task": True,
+        "cancel_task": True,
+        "read_file": False,
+        "glob": False,
+        "grep": False,
+        "web_search": False,
+        "web_fetch": False,
+        "switch_model": False,
+        "list_tasks": False,
+    }
+
+
+def _build_middleware(config: AppConfig) -> list:
+    """Build the middleware stack from config."""
+    middleware = []
+
+    try:
+        from langchain.agents.middleware import ModelRetryMiddleware
+        middleware.append(ModelRetryMiddleware(
+            max_retries=3,
+            retry_on=(TimeoutError, ConnectionError),
+        ))
+    except ImportError:
+        logger.debug("ModelRetryMiddleware not available, skipping")
+
+    try:
+        from langchain.agents.middleware import ToolRetryMiddleware
+        middleware.append(ToolRetryMiddleware(
+            max_retries=2,
+            backoff_factor=2.0,
+            initial_delay=1.0,
+        ))
+    except ImportError:
+        logger.debug("ToolRetryMiddleware not available, skipping")
+
+    try:
+        from langchain.agents.middleware import ModelCallLimitMiddleware
+        middleware.append(ModelCallLimitMiddleware(thread_limit=50, run_limit=20))
+    except ImportError:
+        logger.debug("ModelCallLimitMiddleware not available, skipping")
+
+    try:
+        from langchain.agents.middleware import ToolCallLimitMiddleware
+        middleware.append(ToolCallLimitMiddleware(thread_limit=100, run_limit=30))
+    except ImportError:
+        logger.debug("ToolCallLimitMiddleware not available, skipping")
+
+    # Context management (summarization + tool output clearing)
+    ctx_config = getattr(config, "context", None)
+    if ctx_config:
+        try:
+            from langchain.agents.middleware import SummarizationMiddleware
+            middleware.append(SummarizationMiddleware(
+                model="gpt-4o-mini",
+                trigger=("tokens", ctx_config.summarization_trigger_tokens
+                         if hasattr(ctx_config, "summarization_trigger_tokens") else 100000),
+                keep=("messages", ctx_config.keep_recent_messages
+                      if hasattr(ctx_config, "keep_recent_messages") else 20),
+            ))
+        except ImportError:
+            logger.debug("SummarizationMiddleware not available, skipping")
+
+        try:
+            from langchain.agents.middleware import ContextEditingMiddleware, ClearToolUsesEdit
+            middleware.append(ContextEditingMiddleware(edits=[
+                ClearToolUsesEdit(
+                    trigger=ctx_config.clear_tool_outputs_trigger
+                    if hasattr(ctx_config, "clear_tool_outputs_trigger") else 80000,
+                    keep=ctx_config.clear_tool_outputs_keep
+                    if hasattr(ctx_config, "clear_tool_outputs_keep") else 5,
+                    placeholder="[cleared]",
+                ),
+            ]))
+        except ImportError:
+            logger.debug("ContextEditingMiddleware not available, skipping")
+
+    if middleware:
+        logger.info("Middleware stack: %s", [type(m).__name__ for m in middleware])
+
+    return middleware
+
+
 async def create_agent(config: AppConfig):
     """Create and return the main LangAgent agent.
+
+    Uses create_deep_agent() with middleware (AD-14).
 
     Returns:
         tuple: (agent, checkpointer, mcp_client_or_None)
@@ -53,14 +166,30 @@ async def create_agent(config: AppConfig):
         f"{provider_name}:{model_name}",
         **model_kwargs,
     )
-    model = base_model  # may be replaced by RoutingChatModel below
+    model = base_model
     logger.info("LLM provider: %s:%s", provider_name, model_name)
 
     # Workspace
     workspace = config.agent.workspace
     Path(workspace).mkdir(parents=True, exist_ok=True)
 
-    # Custom tools
+    # Memory files
+    memory_files = []
+    for fname in ["IDENTITY.md", "AGENT.md", "MEMORY.md"]:
+        fpath = Path(workspace, fname)
+        if fpath.exists():
+            memory_files.append(fname)
+            logger.info("Memory file loaded: %s", fpath)
+
+    # Skills directory
+    skills_dirs = []
+    if config.skills.enabled:
+        skills_path = Path(workspace, "skills")
+        skills_path.mkdir(parents=True, exist_ok=True)
+        skills_dirs.append("skills")
+        logger.info("Skills directory: %s", skills_path)
+
+    # Custom tools (beyond DeepAgents built-ins)
     custom_tools = [web_search, web_fetch, schedule_task, list_tasks, cancel_task]
     if config.gateway.enabled:
         custom_tools.append(host_execute)
@@ -91,13 +220,11 @@ async def create_agent(config: AppConfig):
         if tier_models:
             init_model_router_tools(tier_models, default_tier=default_tier)
             custom_tools.append(switch_model)
-            # Build label map for system prompt injection
             tier_labels = {
                 name: f"{cfg.name}:{cfg.model}"
                 for name, cfg in config.model_router.tiers.items()
                 if name in tier_models
             }
-            # Replace base model with RoutingChatModel
             model = RoutingChatModel(
                 tier_models=tier_models,
                 tier_labels=tier_labels,
@@ -118,7 +245,7 @@ async def create_agent(config: AppConfig):
         except Exception as e:
             logger.warning("Failed to load MCP tools: %s", e)
 
-    # Checkpointer (SQLite in data_dir — outside agent sandbox)
+    # Checkpointer
     data_dir = config.agent.data_dir
     Path(data_dir).mkdir(parents=True, exist_ok=True)
     db_path = str(Path(data_dir, "checkpoints.db"))
@@ -126,18 +253,31 @@ async def create_agent(config: AppConfig):
     checkpointer = AsyncSqliteSaver(conn)
     await checkpointer.setup()
 
-    # Create agent — explicit StateGraph
+    # Build middleware stack
+    middleware = _build_middleware(config)
+
+    # Build interrupt_on for permissions
+    interrupt_on = _build_interrupt_on(config)
+
+    # Create agent via DeepAgents with middleware (AD-14)
     all_tools = custom_tools + mcp_tools
 
-    graph = build_agent_graph(
+    agent = create_deep_agent(
         model=model,
         tools=all_tools,
+        memory=memory_files if memory_files else None,
+        skills=skills_dirs if skills_dirs else None,
+        backend=FilesystemBackend(root_dir=workspace, virtual_mode=True),
+        interrupt_on=interrupt_on,
+        middleware=middleware,
+        checkpointer=checkpointer,
     )
-    agent = graph.compile(checkpointer=checkpointer)
 
     logger.info(
-        "LangAgent created: %d custom tools, %d MCP tools",
-        len(custom_tools), len(mcp_tools),
+        "LangAgent created (DeepAgents + middleware): %d custom tools, %d MCP tools, "
+        "%d memory files, %d skill dirs, %d middleware",
+        len(custom_tools), len(mcp_tools), len(memory_files),
+        len(skills_dirs), len(middleware),
     )
 
     return agent, checkpointer, mcp_client
