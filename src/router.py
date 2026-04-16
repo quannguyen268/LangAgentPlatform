@@ -84,17 +84,27 @@ class MessageRouter:
             result["telegram"] = {str(u) for u in tg.allowed_users}
         return result
 
-    def get_thread_id(self, channel: str, chat_id: str) -> str:
-        """Map channel+chat to a LangGraph thread_id."""
-        key = f"{channel}_{chat_id}"
+    def get_thread_id(self, channel: str, chat_id: str, user_id: str = "") -> str:
+        """Map channel+chat (and optionally user) to a LangGraph thread_id.
+
+        When user_id is provided the key becomes ``channel_chat_id_user_id``,
+        giving each user their own isolated conversation thread within the same
+        chat.  Omitting user_id preserves the legacy ``channel_chat_id`` format
+        for backwards compatibility.
+        """
+        key = f"{channel}_{chat_id}_{user_id}" if user_id else f"{channel}_{chat_id}"
         counter = self._session_counters.get(key, 0)
         if counter > 0:
             return f"{key}_s{counter}"
         return key
 
-    def reset_session(self, channel: str, chat_id: str) -> None:
-        """Reset session for a chat (called by /new command)."""
-        key = f"{channel}_{chat_id}"
+    def reset_session(self, channel: str, chat_id: str, user_id: str = "") -> None:
+        """Reset session for a chat (called by /new command).
+
+        When user_id is provided, only the session for that specific user is
+        reset.  Omitting user_id resets the shared session (legacy behaviour).
+        """
+        key = f"{channel}_{chat_id}_{user_id}" if user_id else f"{channel}_{chat_id}"
         self._session_counters[key] = self._session_counters.get(key, 0) + 1
         self._session_store.set(key, self._session_counters[key])
         logger.info("Session reset: %s -> s%d", key, self._session_counters[key])
@@ -137,7 +147,7 @@ class MessageRouter:
 
         # Handle session reset
         if msg.reset_session:
-            self.reset_session(msg.channel, msg.chat_id)
+            self.reset_session(msg.channel, msg.chat_id, msg.user_id)
             return None
 
         # Trigger check
@@ -149,8 +159,8 @@ class MessageRouter:
         if not clean_text and not msg.image_base64:
             return None
 
-        # Thread ID for LangGraph persistence
-        thread_id = self.get_thread_id(msg.channel, msg.chat_id)
+        # Thread ID for LangGraph persistence (per-user isolation when user_id set)
+        thread_id = self.get_thread_id(msg.channel, msg.chat_id, msg.user_id)
 
         # Set context so schedule_task knows where to send results
         set_current_context(msg.channel, msg.chat_id)
