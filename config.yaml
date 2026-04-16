@@ -138,3 +138,24 @@ claude_code:
 
 logging:
   level: "INFO"                  # DEBUG | INFO | WARNING | ERROR
+
+permissions:
+  mode: "default"                # "default" | "auto" | "plan"
+
+streaming:
+  enabled: true
+  token_batching_ms: 50
+  show_thinking: false
+  show_tool_details: true
+  show_cost: false
+
+context:
+  max_tokens: 128000
+  compact_threshold: 0.8
+  consolidate_threshold: 0.9
+  preserve_recent_turns: 10
+
+cost:
+  budget_per_session: null
+  budget_per_agent: 100.0
+  on_budget_exceeded: "downgrade"  # "downgrade" | "pause" | "abort"
