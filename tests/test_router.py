@@ -138,8 +138,8 @@ class TestHandleMessage:
         )
         result = await router.handle_message(msg, router_config.channels.telegram)
         assert result is None
-        # Session should be incremented
-        assert router.get_thread_id("telegram", "1") == "telegram_1_s1"
+        # Session should be incremented for the specific user
+        assert router.get_thread_id("telegram", "1", "user1") == "telegram_1_user1_s1"
 
     @pytest.mark.asyncio
     async def test_no_trigger_in_group(self, router, router_config):

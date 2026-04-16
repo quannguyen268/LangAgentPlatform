@@ -247,6 +247,31 @@ class LoggingConfig(BaseModel):
         return v
 
 
+class PermissionsConfig(BaseModel):
+    mode: str = "default"  # "default" | "auto" | "plan"
+
+
+class StreamingConfig(BaseModel):
+    enabled: bool = True
+    token_batching_ms: int = 50
+    show_thinking: bool = False
+    show_tool_details: bool = True
+    show_cost: bool = False
+
+
+class ContextConfig(BaseModel):
+    max_tokens: int = 128000
+    compact_threshold: float = 0.8
+    consolidate_threshold: float = 0.9
+    preserve_recent_turns: int = 10
+
+
+class CostConfig(BaseModel):
+    budget_per_session: Optional[float] = None
+    budget_per_agent: float = 100.0
+    on_budget_exceeded: str = "downgrade"  # "downgrade" | "pause" | "abort"
+
+
 class AppConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -261,6 +286,10 @@ class AppConfig(BaseModel):
     avatar: AvatarConfig = Field(default_factory=AvatarConfig)
     claude_code: ClaudeCodeConfig = Field(default_factory=ClaudeCodeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
+    streaming: StreamingConfig = Field(default_factory=StreamingConfig)
+    context: ContextConfig = Field(default_factory=ContextConfig)
+    cost: CostConfig = Field(default_factory=CostConfig)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:

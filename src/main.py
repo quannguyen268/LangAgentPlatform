@@ -1,4 +1,4 @@
-"""CianaParrot entry point - wires channels, agent, and scheduler."""
+"""LangAgent Platform entry point - wires channels, agent, and scheduler."""
 
 import asyncio
 import logging
@@ -7,7 +7,7 @@ import signal
 from .avatar import AvatarBridge
 from .gateway.bridges.claude_code import setup_bridge
 from .config import load_config
-from .agent import create_cianaparrot_agent
+from .agent import create_agent
 from .middleware import init_middleware_bridges
 from .router import MessageRouter
 from .scheduler import Scheduler
@@ -28,14 +28,14 @@ async def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    logger.info("CianaParrot starting...")
+    logger.info("LangAgent Platform starting...")
 
     # Initialize bridge availability for skill filtering
     if config.gateway.enabled:
         init_middleware_bridges(config.gateway)
 
     # Create agent
-    agent, checkpointer, mcp_client = await create_cianaparrot_agent(config)
+    agent, checkpointer, mcp_client = await create_agent(config)
     logger.info("Agent ready")
 
     # Avatar emotion system (relays via gateway SSE)
@@ -104,7 +104,7 @@ async def main() -> None:
         scheduler = Scheduler(agent, config, channels=channels_map)
         await scheduler.start()
 
-    logger.info("CianaParrot is running. Press Ctrl+C to stop.")
+    logger.info("LangAgent Platform is running. Press Ctrl+C to stop.")
 
     # Graceful shutdown
     stop_event = asyncio.Event()
@@ -137,7 +137,7 @@ async def main() -> None:
         except Exception:
             logger.debug("Checkpointer close failed (already closed)")
 
-    logger.info("CianaParrot stopped.")
+    logger.info("LangAgent Platform stopped.")
 
 
 if __name__ == "__main__":
