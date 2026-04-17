@@ -159,3 +159,9 @@ cost:
   budget_per_session: null
   budget_per_agent: 100.0
   on_budget_exceeded: "downgrade"  # "downgrade" | "pause" | "abort"
+
+dream:
+  enabled: false
+  interval_hours: 2.0
+  max_batch_size: 20
+  max_iterations: 10

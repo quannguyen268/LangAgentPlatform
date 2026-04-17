@@ -272,6 +272,14 @@ class CostConfig(BaseModel):
     on_budget_exceeded: str = "downgrade"  # "downgrade" | "pause" | "abort"
 
 
+class DreamConfig(BaseModel):
+    enabled: bool = False  # Default false since it requires workspace setup
+    interval_hours: float = 2.0
+    max_batch_size: int = 20
+    max_iterations: int = 10
+    model: str = ""  # Empty = use default provider
+
+
 class AppConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -290,6 +298,7 @@ class AppConfig(BaseModel):
     streaming: StreamingConfig = Field(default_factory=StreamingConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     cost: CostConfig = Field(default_factory=CostConfig)
+    dream: DreamConfig = Field(default_factory=DreamConfig)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:

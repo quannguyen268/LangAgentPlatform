@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import signal
+from pathlib import Path
 
 from .avatar import AvatarBridge
 from .gateway.bridges.claude_code import setup_bridge
@@ -116,6 +117,35 @@ async def main() -> None:
         scheduler = Scheduler(agent, config, channels=channels_map)
         await scheduler.start()
 
+    # Dream process (periodic memory reflection)
+    dream_task = None
+    if config.dream.enabled:
+        from .memory.dream import DreamProcess
+        dream_proc = DreamProcess(
+            workspace=config.agent.workspace,
+            memory_dir=str(Path(config.agent.workspace, "memory")),
+            max_batch_size=config.dream.max_batch_size,
+            max_iterations=config.dream.max_iterations,
+        )
+
+        async def dream_loop():
+            interval = config.dream.interval_hours * 3600
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    from langchain.chat_models import init_chat_model
+                    dream_model_name = config.dream.model or f"{config.provider.name}:{config.provider.model}"
+                    dream_model = init_chat_model(dream_model_name)
+                    result = await dream_proc.run(model=dream_model)
+                    logger.info("Dream completed: %s", result)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error("Dream failed: %s", e)
+
+        dream_task = asyncio.create_task(dream_loop())
+        logger.info("Dream process enabled (interval: %.1fh)", config.dream.interval_hours)
+
     logger.info("LangAgent Platform is running. Press Ctrl+C to stop.")
 
     # Graceful shutdown
@@ -134,6 +164,12 @@ async def main() -> None:
 
     # Cleanup
     logger.info("Shutting down...")
+    if dream_task:
+        dream_task.cancel()
+        try:
+            await dream_task
+        except asyncio.CancelledError:
+            pass
     if scheduler:
         await scheduler.stop()
     for ch in channels:
