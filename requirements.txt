@@ -17,5 +17,11 @@ markdownify>=0.13
 # Config validation
 pydantic>=2.0
 
+# Memory versioning
+dulwich>=0.22.0
+
 # Skills (CLI tools installed as pip packages)
 nano-pdf>=0.1.0
+
+# Test dependencies
+pytest-aiohttp>=1.0.5
