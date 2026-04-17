@@ -82,8 +82,20 @@ async def main() -> None:
         logger.info("CLI channel configured")
 
     if config.channels.api.enabled:
+        from .api.websocket import EventHub
+        from .observability.cost import CostTracker
+
+        event_hub = EventHub()
+        cost_tracker = CostTracker()
+
         api_config = config.channels.api
-        api = APIChannel(host=api_config.host, port=api_config.port)
+        api = APIChannel(
+            host=api_config.host,
+            port=api_config.port,
+            workspace=config.agent.workspace,
+            cost_tracker=cost_tracker,
+            event_hub=event_hub,
+        )
 
         async def api_callback(msg):
             return await router.handle_message(msg, api_config)

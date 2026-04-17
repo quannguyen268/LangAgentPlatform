@@ -69,9 +69,19 @@ class APIChannel(AbstractChannel):
 
     name = "api"
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8900) -> None:
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8900,
+        workspace=None,
+        cost_tracker=None,
+        event_hub=None,
+    ) -> None:
         self._host = host
         self._port = port
+        self._workspace = workspace
+        self._cost_tracker = cost_tracker
+        self._event_hub = event_hub
         self._callback = None
         self._runner: web.AppRunner | None = None
         # Maps request_id -> asyncio.Queue[str | None]
@@ -88,6 +98,16 @@ class APIChannel(AbstractChannel):
         app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
         app.router.add_get("/v1/models", self._handle_models)
         app.router.add_get("/health", self._handle_health)
+
+        # Management API routes
+        if self._workspace:
+            from ..api.routes import setup_management_routes
+            setup_management_routes(app, workspace=self._workspace, cost_tracker=self._cost_tracker)
+
+        # WebSocket
+        if self._event_hub:
+            from ..api.websocket import setup_websocket
+            setup_websocket(app, self._event_hub)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
