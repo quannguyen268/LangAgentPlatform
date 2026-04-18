@@ -18,6 +18,11 @@ class SubAgentRegistry:
 
     Tracks AgentInfo (state, cost, iteration) and the backing asyncio.Task
     for each sub-agent. Also wraps an AgentStore for BaseStore communication.
+
+    NOT thread-safe. Call from a single asyncio event loop only (master agent
+    + HealthMonitor background task). Cooperative concurrency makes the
+    two-dict-write race in register()/deregister() unobservable as long as
+    there are no awaits between the dict mutations.
     """
 
     def __init__(self, store: BaseStore):
@@ -69,14 +74,25 @@ class SubAgentRegistry:
             info.iteration += 1
 
     async def deregister(self, agent_id: str) -> None:
-        """Cancel the agent's task and remove from registry."""
+        """Cancel the agent's task and remove from registry.
+
+        Pops dict entries first so concurrent readers see the agent as gone
+        before we start awaiting cancellation. On timeout the task may still
+        be running in the background (ignoring cancellation) — we log and
+        abandon it rather than hanging forever.
+        """
         task = self._tasks.pop(agent_id, None)
         info = self._agents.pop(agent_id, None)
         if task and not task.done():
             task.cancel()
             try:
                 await asyncio.wait_for(task, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Sub-agent %s task did not cancel within 5s; abandoning",
+                    agent_id,
+                )
+            except asyncio.CancelledError:
                 pass
         if info:
             logger.info("Deregistered sub-agent %s", agent_id)
