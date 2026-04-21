@@ -1,7 +1,19 @@
 """Orchestration tools — spawn_agent, recall_agent, monitor_agents, etc.
 
 These tools are given to the master agent so it can manage sub-agents.
-The tools operate on a module-level SubAgentRegistry set by init_orchestration_tools.
+
+## Design: module-level globals
+
+Tools operate on module-level references (`_registry`, `_spawner`, `_cost_tracker`)
+set by `init_orchestration_tools()`. This is a LangChain `@tool` compatibility
+trade-off — tools cannot carry per-call state via closure or config because their
+visible signature is what the LLM invokes against. The alternatives (factory
+functions returning fresh tool closures, ContextVar, bound methods) either complicate
+the importable tool list in main.py or add runtime overhead. Module-level singletons
+are the least noisy option for a single-process master agent.
+
+Calling `init_orchestration_tools()` more than once in a process rebinds the globals
+and logs a warning — it's safe for tests but suspicious in production.
 """
 from __future__ import annotations
 
@@ -16,9 +28,11 @@ from .state import AgentInfo, SubAgentState
 
 logger = logging.getLogger(__name__)
 
+VALID_TIERS = frozenset({"lite", "standard", "advanced", "expert"})
+
 # Module-level references initialized by init_orchestration_tools()
 _registry: SubAgentRegistry | None = None
-_spawner: Callable | None = None          # async (info, **kwargs) → asyncio.Task
+_spawner: Callable | None = None          # async (info) → asyncio.Task
 _cost_tracker = None                        # CostTracker or None
 
 
@@ -34,8 +48,16 @@ def init_orchestration_tools(
         spawner: async callable that creates the asyncio.Task for an agent
                  signature: async spawner(info: AgentInfo) → asyncio.Task
         cost_tracker: Optional CostTracker for review_cost
+
+    Safe to call multiple times — subsequent calls rebind the globals and log a
+    warning. Typical production flow is a single call at agent startup.
     """
     global _registry, _spawner, _cost_tracker
+    if _registry is not None and _registry is not registry:
+        logger.warning(
+            "Orchestration tools re-initialized; previous registry (%r) replaced",
+            _registry,
+        )
     _registry = registry
     _spawner = spawner
     _cost_tracker = cost_tracker
@@ -91,13 +113,18 @@ async def spawn_agent(
         task_obj = await _spawner(info)
     else:
         import asyncio
+        logger.warning(
+            "spawn_agent called with no spawner configured — agent %s will do no work. "
+            "Wire a real spawner via init_orchestration_tools(spawner=...) in production.",
+            agent_id,
+        )
         async def placeholder():
             await asyncio.sleep(0.1)
         task_obj = asyncio.create_task(placeholder())
 
     _registry.register(info, task_obj)
     logger.info("Spawned agent %s (name=%s, role=%s, tier=%s)", agent_id, name, role, tier)
-    return agent_id
+    return f"Spawned {name} as {agent_id} (role={role}, tier={tier})"
 
 
 @tool
@@ -185,6 +212,12 @@ async def switch_agent_model(agent_id: str, tier: str) -> str:
     """
     if _registry is None:
         return "Error: orchestration not initialized"
+
+    if tier not in VALID_TIERS:
+        return (
+            f"Invalid tier '{tier}'. Must be one of: "
+            f"{', '.join(sorted(VALID_TIERS))}"
+        )
 
     info = _registry.get_agent(agent_id)
     if info is None:

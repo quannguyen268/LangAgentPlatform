@@ -225,3 +225,63 @@ async def test_assign_task():
         await t
     except asyncio.CancelledError:
         pass
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_without_spawner_uses_placeholder():
+    """When no spawner is configured, spawn_agent falls back to a placeholder
+    task. The agent is still registered, but won't do any real work."""
+    from src.subagent.registry import SubAgentRegistry
+    from src.subagent.tools import init_orchestration_tools, spawn_agent
+
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    init_orchestration_tools(registry=registry, spawner=None, cost_tracker=None)
+
+    result = await spawn_agent.ainvoke({
+        "name": "ghost",
+        "role": "executor",
+        "task": "do nothing",
+        "tools": [],
+    })
+    assert "agent-" in result
+    agents = registry.list_agents()
+    assert len(agents) == 1
+    assert agents[0].name == "ghost"
+
+    # Let the placeholder sleep(0.1) complete so we don't leak the task
+    await asyncio.sleep(0.15)
+    await registry.deregister(agents[0].agent_id)
+
+
+@pytest.mark.asyncio
+async def test_switch_agent_model_rejects_invalid_tier():
+    """Invalid tier strings are rejected without mutating the agent."""
+    from src.subagent.registry import SubAgentRegistry
+    from src.subagent.state import AgentInfo
+    from src.subagent.tools import init_orchestration_tools, switch_agent_model
+
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+
+    async def dummy():
+        await asyncio.sleep(10)
+
+    t = asyncio.create_task(dummy())
+    info = AgentInfo(
+        agent_id="a1", name="n1", role="executor",
+        task="t", tier="standard", tools=[], skills=[],
+    )
+    registry.register(info, t)
+
+    init_orchestration_tools(registry=registry, spawner=None, cost_tracker=None)
+    result = await switch_agent_model.ainvoke({"agent_id": "a1", "tier": "mega-advanced"})
+    assert "invalid" in result.lower()
+    # Tier must not have changed
+    assert registry.get_agent("a1").tier == "standard"
+
+    t.cancel()
+    try:
+        await t
+    except asyncio.CancelledError:
+        pass
