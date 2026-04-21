@@ -192,3 +192,82 @@ async def test_shutdown_all_on_empty_registry():
     # Should not raise
     await registry.shutdown_all()
     assert registry.list_agents() == []
+
+
+@pytest.mark.asyncio
+async def test_sync_from_store_updates_heartbeat():
+    """sync_from_store refreshes AgentInfo.last_heartbeat from AgentStore."""
+    import time
+    from src.subagent.registry import SubAgentRegistry
+    from src.subagent.state import AgentInfo
+
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+
+    async def dummy():
+        await asyncio.sleep(0.01)
+
+    t = asyncio.create_task(dummy())
+    info = AgentInfo(
+        agent_id="a1", name="n1", role="executor",
+        task="t", tier="standard", tools=[], skills=[],
+    )
+    # Simulate an old last_heartbeat on the in-memory info
+    info.last_heartbeat = 1.0
+    registry.register(info, t)
+
+    # Sub-agent writes a fresh heartbeat to BaseStore
+    fresh_ts = time.time()
+    await registry.agent_store.write_heartbeat("a1", iteration=7, status="running")
+
+    # sync_from_store pulls it into AgentInfo
+    await registry.sync_from_store()
+
+    got = registry.get_agent("a1")
+    assert got.iteration == 7
+    # last_heartbeat should be updated to approximately fresh_ts (written just above)
+    assert got.last_heartbeat >= fresh_ts - 1.0
+
+    await t
+
+
+@pytest.mark.asyncio
+async def test_sync_from_store_empty():
+    """sync_from_store is safe when no agents and no heartbeats exist."""
+    from src.subagent.registry import SubAgentRegistry
+
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    await registry.sync_from_store()  # Should not raise
+    assert registry.list_agents() == []
+
+
+@pytest.mark.asyncio
+async def test_sync_from_store_missing_heartbeat_leaves_info_unchanged():
+    """If an agent has no heartbeat in store, AgentInfo is left untouched."""
+    from src.subagent.registry import SubAgentRegistry
+    from src.subagent.state import AgentInfo
+
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+
+    async def dummy():
+        await asyncio.sleep(0.01)
+
+    t = asyncio.create_task(dummy())
+    info = AgentInfo(
+        agent_id="a1", name="n1", role="executor",
+        task="t", tier="standard", tools=[], skills=[],
+    )
+    original_iteration = info.iteration
+    original_heartbeat = info.last_heartbeat
+    registry.register(info, t)
+
+    # No write_heartbeat call — sync_from_store should be a no-op
+    await registry.sync_from_store()
+
+    got = registry.get_agent("a1")
+    assert got.iteration == original_iteration
+    assert got.last_heartbeat == original_heartbeat
+
+    await t

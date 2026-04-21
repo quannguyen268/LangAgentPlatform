@@ -131,6 +131,9 @@ async def main() -> None:
             while True:
                 await asyncio.sleep(interval)
                 try:
+                    # Pull fresh heartbeat + iteration from BaseStore so the
+                    # monitor sees what sub-agents have actually written.
+                    await subagent_registry.sync_from_store()
                     unhealthy = monitor.check_all()
                     if unhealthy:
                         logger.warning("Unhealthy sub-agents: %s", unhealthy)

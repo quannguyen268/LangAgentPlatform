@@ -111,3 +111,29 @@ class SubAgentRegistry:
             *(self.deregister(agent_id) for agent_id in agent_ids),
             return_exceptions=True,
         )
+
+    async def sync_from_store(self) -> None:
+        """Pull heartbeat + iteration from BaseStore into AgentInfo.
+
+        Sub-agents write heartbeats to BaseStore via ``AgentStore.write_heartbeat``
+        (the source of truth for liveness). HealthMonitor reads from AgentInfo
+        (in-memory). This method bridges the two — call it before
+        ``HealthMonitor.check_all()`` to refresh AgentInfo from the store.
+
+        Safe to call with an empty registry. Reads are best-effort: if a read
+        fails, the corresponding AgentInfo is left unchanged and a debug log
+        is emitted.
+        """
+        for agent_id, info in list(self._agents.items()):
+            try:
+                hb = await self._agent_store.read_heartbeat(agent_id)
+            except Exception as e:
+                logger.debug("sync_from_store: heartbeat read failed for %s: %s", agent_id, e)
+                continue
+            if hb:
+                ts = hb.get("timestamp")
+                if isinstance(ts, (int, float)):
+                    info.last_heartbeat = float(ts)
+                itr = hb.get("iteration")
+                if isinstance(itr, int):
+                    info.iteration = itr

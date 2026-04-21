@@ -17,6 +17,7 @@ and logs a warning — it's safe for tests but suspicious in production.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Callable, Optional
@@ -24,7 +25,7 @@ from typing import Callable, Optional
 from langchain.tools import tool
 
 from .registry import SubAgentRegistry
-from .state import AgentInfo, SubAgentState
+from .state import AgentInfo
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,11 @@ async def spawn_agent(
         skills: Optional list of skill names to load
 
     Returns:
-        The spawned agent's ID
+        Confirmation string of the form
+        ``"Spawned {name} as {agent_id} (role={role}, tier={tier})"``.
+        The ``agent_id`` is the ``agent-*`` token embedded in this string and is
+        the handle used for ``recall_agent``, ``monitor_agents``, ``assign_task``,
+        and ``switch_agent_model``.
     """
     if _registry is None:
         return "Error: orchestration not initialized"
@@ -112,7 +117,6 @@ async def spawn_agent(
     if _spawner:
         task_obj = await _spawner(info)
     else:
-        import asyncio
         logger.warning(
             "spawn_agent called with no spawner configured — agent %s will do no work. "
             "Wire a real spawner via init_orchestration_tools(spawner=...) in production.",

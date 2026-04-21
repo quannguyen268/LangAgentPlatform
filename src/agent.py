@@ -240,7 +240,7 @@ async def create_agent(config: AppConfig):
 
     # Sub-agent system (orchestration tools + registry)
     subagent_registry = None
-    if getattr(config, "subagent", None) and config.subagent.enabled:
+    if config.subagent.enabled:
         from .subagent.registry import SubAgentRegistry
         from .subagent.tools import (
             init_orchestration_tools,
