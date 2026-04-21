@@ -14,9 +14,11 @@ from deepagents.backends import FilesystemBackend
 from langchain.chat_models import init_chat_model
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.store.memory import InMemoryStore
 
 from . import middleware as _middleware  # noqa: F401 — patches skill YAML parser
 from .config import AppConfig
+from .observability.cost import CostTracker
 from .tools.web import web_search, web_fetch, init_web_tools
 from .tools.cron import schedule_task, list_tasks, cancel_task, init_cron_tools
 from .tools.host import host_execute, init_host_tools
@@ -136,7 +138,7 @@ async def create_agent(config: AppConfig):
     Uses create_deep_agent() with middleware (AD-14).
 
     Returns:
-        tuple: (agent, checkpointer, mcp_client_or_None)
+        tuple: (agent, checkpointer, mcp_client_or_None, subagent_registry_or_None, cost_tracker)
     """
     # Initialize tool configs
     init_web_tools(config.web)
@@ -233,6 +235,31 @@ async def create_agent(config: AppConfig):
             logger.info("RoutingChatModel active (default_tier=%s, tiers=%s)",
                         default_tier, sorted(tier_models.keys()))
 
+    # Cost tracker (shared between orchestration tools and API channel)
+    cost_tracker = CostTracker()
+
+    # Sub-agent system (orchestration tools + registry)
+    subagent_registry = None
+    if getattr(config, "subagent", None) and config.subagent.enabled:
+        from .subagent.registry import SubAgentRegistry
+        from .subagent.tools import (
+            init_orchestration_tools,
+            spawn_agent, recall_agent, monitor_agents,
+            assign_task, switch_agent_model, review_cost,
+        )
+        subagent_store = InMemoryStore()
+        subagent_registry = SubAgentRegistry(subagent_store)
+        init_orchestration_tools(
+            registry=subagent_registry,
+            spawner=None,    # Phase 2A wires a real DeepAgents-based spawner
+            cost_tracker=cost_tracker,
+        )
+        custom_tools.extend([
+            spawn_agent, recall_agent, monitor_agents,
+            assign_task, switch_agent_model, review_cost,
+        ])
+        logger.info("Orchestration tools enabled (6 tools)")
+
     # MCP tools
     mcp_client = None
     mcp_tools = []
@@ -280,4 +307,4 @@ async def create_agent(config: AppConfig):
         len(skills_dirs), len(middleware),
     )
 
-    return agent, checkpointer, mcp_client
+    return agent, checkpointer, mcp_client, subagent_registry, cost_tracker

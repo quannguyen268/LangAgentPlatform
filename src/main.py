@@ -36,7 +36,7 @@ async def main() -> None:
         init_middleware_bridges(config.gateway)
 
     # Create agent
-    agent, checkpointer, mcp_client = await create_agent(config)
+    agent, checkpointer, mcp_client, subagent_registry, cost_tracker = await create_agent(config)
     logger.info("Agent ready")
 
     # Avatar emotion system (relays via gateway SSE)
@@ -84,10 +84,8 @@ async def main() -> None:
 
     if config.channels.api.enabled:
         from .api.websocket import EventHub
-        from .observability.cost import CostTracker
 
         event_hub = EventHub()
-        cost_tracker = CostTracker()
 
         api_config = config.channels.api
         api = APIChannel(
@@ -116,6 +114,34 @@ async def main() -> None:
         channels_map = {ch.name: ch for ch in channels}
         scheduler = Scheduler(agent, config, channels=channels_map)
         await scheduler.start()
+
+    # Health monitor (background task checking sub-agent heartbeats)
+    health_task = None
+    if config.subagent.enabled and subagent_registry is not None:
+        from .subagent.health import HealthMonitor
+        monitor = HealthMonitor(
+            registry=subagent_registry,
+            heartbeat_timeout=config.subagent.heartbeat_timeout,
+            task_timeout=config.subagent.task_timeout,
+            max_iterations=config.subagent.max_iterations,
+        )
+
+        async def health_loop():
+            interval = config.subagent.health_check_interval
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    unhealthy = monitor.check_all()
+                    if unhealthy:
+                        logger.warning("Unhealthy sub-agents: %s", unhealthy)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error("Health monitor error: %s", e)
+
+        health_task = asyncio.create_task(health_loop())
+        logger.info("Health monitor started (interval: %.1fs)",
+                    config.subagent.health_check_interval)
 
     # Dream process (periodic memory reflection)
     dream_task = None
@@ -164,6 +190,12 @@ async def main() -> None:
 
     # Cleanup
     logger.info("Shutting down...")
+    if health_task:
+        health_task.cancel()
+        try:
+            await health_task
+        except asyncio.CancelledError:
+            pass
     if dream_task:
         dream_task.cancel()
         try:

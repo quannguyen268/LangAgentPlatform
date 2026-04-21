@@ -165,3 +165,11 @@ dream:
   interval_hours: 2.0
   max_batch_size: 20
   max_iterations: 10
+
+subagent:
+  enabled: true
+  heartbeat_timeout: 120.0
+  task_timeout: 1800.0
+  max_iterations: 50
+  max_retries: 1
+  health_check_interval: 30.0
