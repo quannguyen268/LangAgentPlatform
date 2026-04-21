@@ -96,3 +96,18 @@ class SubAgentRegistry:
                 pass
         if info:
             logger.info("Deregistered sub-agent %s", agent_id)
+
+    async def shutdown_all(self) -> None:
+        """Cancel all registered sub-agents. Called at platform shutdown.
+
+        Deregisters every active agent in parallel so the platform can exit
+        without leaving orphan coroutines. Safe to call with an empty registry.
+        """
+        agent_ids = list(self._agents.keys())
+        if not agent_ids:
+            return
+        logger.info("Shutting down %d sub-agents", len(agent_ids))
+        await asyncio.gather(
+            *(self.deregister(agent_id) for agent_id in agent_ids),
+            return_exceptions=True,
+        )

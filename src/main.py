@@ -196,6 +196,9 @@ async def main() -> None:
             await health_task
         except asyncio.CancelledError:
             pass
+    # Deregister all sub-agents so their tasks don't leak as orphan coroutines
+    if subagent_registry is not None:
+        await subagent_registry.shutdown_all()
     if dream_task:
         dream_task.cancel()
         try:

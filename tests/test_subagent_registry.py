@@ -150,3 +150,45 @@ async def test_filter_by_state():
 
     # Clean up all tasks
     await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_all_cancels_every_agent():
+    """shutdown_all deregisters every agent and cancels their tasks."""
+    from src.subagent.registry import SubAgentRegistry
+    from src.subagent.state import AgentInfo
+
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+
+    async def long_running():
+        await asyncio.sleep(10)
+
+    tasks = []
+    for i in range(3):
+        t = asyncio.create_task(long_running())
+        tasks.append(t)
+        info = AgentInfo(
+            agent_id=f"a{i}", name=f"n{i}", role="executor",
+            task="t", tier="standard", tools=[], skills=[],
+        )
+        registry.register(info, t)
+
+    assert len(registry.list_agents()) == 3
+    await registry.shutdown_all()
+    assert registry.list_agents() == []
+    # All tasks should have been cancelled
+    await asyncio.sleep(0.05)
+    assert all(t.cancelled() or t.done() for t in tasks)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_all_on_empty_registry():
+    """shutdown_all is safe when no agents are registered."""
+    from src.subagent.registry import SubAgentRegistry
+
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    # Should not raise
+    await registry.shutdown_all()
+    assert registry.list_agents() == []
