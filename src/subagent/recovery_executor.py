@@ -5,7 +5,9 @@ and actually performing the retry / escalate / reassign / abort.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+from typing import Optional, Protocol
 
 from .broadcaster import EventBroadcaster
 from .context_recovery import build_recovery_context
@@ -16,6 +18,14 @@ from .state import AgentInfo, SubAgentState
 logger = logging.getLogger(__name__)
 
 
+class Spawner(Protocol):
+    """Minimal spawner contract — matches DeepAgentsSpawner."""
+
+    async def spawn(
+        self, info: AgentInfo, recovery_context: Optional[str] = None
+    ) -> asyncio.Task: ...
+
+
 class RecoveryExecutor:
     """Execute recovery actions decided by RecoveryChain."""
 
@@ -23,7 +33,7 @@ class RecoveryExecutor:
         self,
         registry: SubAgentRegistry,
         chain: RecoveryChain,
-        spawner,
+        spawner: Spawner,
         broadcaster: EventBroadcaster,
     ):
         self._registry = registry
@@ -55,8 +65,18 @@ class RecoveryExecutor:
             await self._abort(info)
 
     async def _respawn(self, info: AgentInfo, *, recovery: bool) -> None:
-        """Cancel the old task, build a recovery context, and spawn a new one."""
-        # Cancel the old task without fully deregistering — keep AgentInfo around
+        """Cancel the old task, build a recovery context, and spawn a new one.
+
+        Failure handling: if either ``build_recovery_context`` or
+        ``spawner.spawn`` raises, the registry would otherwise be left with a
+        zombie agent (cancelled old task, bumped retry_count, SPAWNING state,
+        no new task). We defend against both:
+
+        * Context-build failures are downgraded to ``context=None`` with a
+          warning — the agent still respawns, just without prior-failure memory.
+        * Spawn failures transition the agent to FAILED and deregister it,
+          then re-raise so the caller sees the error.
+        """
         old_task = self._registry.get_task(info.agent_id)
         if old_task and not old_task.done():
             old_task.cancel()
@@ -65,16 +85,34 @@ class RecoveryExecutor:
         info.state = SubAgentState.SPAWNING
         info.error = None
 
-        context = None
+        context: Optional[str] = None
         if recovery:
-            context = await build_recovery_context(
-                agent_id=info.agent_id,
-                role=info.role,
-                store=self._registry._store,
-            )
+            try:
+                context = await build_recovery_context(
+                    agent_id=info.agent_id,
+                    role=info.role,
+                    store=self._registry.store,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Recovery context build failed for %s: %s; respawning without context",
+                    info.agent_id,
+                    e,
+                )
+                context = None
 
-        new_task = await self._spawner.spawn(info, recovery_context=context)
-        self._registry._tasks[info.agent_id] = new_task
+        try:
+            new_task = await self._spawner.spawn(info, recovery_context=context)
+        except Exception:
+            logger.exception("Recovery spawn failed for %s; aborting", info.agent_id)
+            info.state = SubAgentState.FAILED
+            await self._registry.deregister(info.agent_id)
+            raise
+
+        self._registry.replace_task(info.agent_id, new_task)
+        logger.info(
+            "Respawned %s (retry=%d, tier=%s)", info.agent_id, info.retry_count, info.tier,
+        )
 
     async def _abort(self, info: AgentInfo) -> None:
         info.state = SubAgentState.FAILED

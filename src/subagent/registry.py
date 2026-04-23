@@ -35,11 +35,25 @@ class SubAgentRegistry:
     def agent_store(self) -> AgentStore:
         return self._agent_store
 
+    @property
+    def store(self) -> BaseStore:
+        return self._store
+
     def register(self, info: AgentInfo, task: asyncio.Task) -> None:
         """Register a new sub-agent and its backing task."""
         self._agents[info.agent_id] = info
         self._tasks[info.agent_id] = task
         logger.info("Registered sub-agent %s (name=%s, role=%s)", info.agent_id, info.name, info.role)
+
+    def replace_task(self, agent_id: str, task: asyncio.Task) -> None:
+        """Swap in a new task for an already-registered agent (respawn path).
+
+        Rejects unknown agent_ids to avoid resurrecting a deregistered entry —
+        recovery must only replace tasks for agents still in the registry.
+        """
+        if agent_id not in self._agents:
+            raise KeyError(f"replace_task: agent {agent_id} is not registered")
+        self._tasks[agent_id] = task
 
     def get_agent(self, agent_id: str) -> Optional[AgentInfo]:
         return self._agents.get(agent_id)
