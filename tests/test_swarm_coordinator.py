@@ -71,3 +71,82 @@ async def test_launch_respects_goal_override():
     # Every spawned agent's task should include the override
     for task_prompt in captured:
         assert "custom goal" in task_prompt
+
+
+def _make_swarm():
+    registry = SubAgentRegistry(InMemoryStore())
+    broadcaster = EventBroadcaster(None)
+    spawner = MagicMock()
+
+    async def spawn_stub(info, recovery_context=None):
+        async def noop():
+            await asyncio.sleep(0.01)
+        return asyncio.create_task(noop())
+
+    spawner.spawn = AsyncMock(side_effect=spawn_stub)
+    swarm = Swarm(registry=registry, broadcaster=broadcaster,
+                  spawner=spawner, workspace="/tmp")
+    return swarm, registry, spawner
+
+
+@pytest.mark.asyncio
+async def test_launch_rejects_unknown_gate_before_spawning():
+    """Gate validation must happen BEFORE any spawn so a typo can't leave
+    half-launched teams behind."""
+    from src.swarm.phases import HumanApprovalGate
+    swarm, registry, spawner = _make_swarm()
+
+    with pytest.raises(ValueError, match="unknown phases"):
+        await swarm.launch(
+            _make_template(),
+            gates={"paln": HumanApprovalGate(key="x")},  # typo
+        )
+
+    spawner.spawn.assert_not_awaited()
+    assert registry.list_agents() == []
+
+
+@pytest.mark.asyncio
+async def test_launch_rolls_back_on_partial_failure():
+    """If spawner.spawn fails on the 2nd agent, the 1st must be deregistered."""
+    registry = SubAgentRegistry(InMemoryStore())
+    broadcaster = EventBroadcaster(None)
+    spawner = MagicMock()
+
+    call = {"n": 0}
+
+    async def spawn_stub(info, recovery_context=None):
+        call["n"] += 1
+        if call["n"] == 2:
+            raise RuntimeError("spawn boom on #2")
+
+        async def noop():
+            await asyncio.sleep(0.01)
+        return asyncio.create_task(noop())
+
+    spawner.spawn = AsyncMock(side_effect=spawn_stub)
+    swarm = Swarm(registry=registry, broadcaster=broadcaster,
+                  spawner=spawner, workspace="/tmp")
+
+    with pytest.raises(RuntimeError, match="spawn boom"):
+        await swarm.launch(_make_template())
+
+    # Rollback: first agent deregistered, no harness recorded
+    assert registry.list_agents() == []
+    assert swarm.get_harness("team-any") is None
+
+
+@pytest.mark.asyncio
+async def test_get_harness_returns_none_for_unknown():
+    swarm, _, _ = _make_swarm()
+    assert swarm.get_harness("team-ghost") is None
+
+
+@pytest.mark.asyncio
+async def test_two_launches_produce_distinct_team_ids():
+    swarm, _, _ = _make_swarm()
+    t1 = await swarm.launch(_make_template())
+    t2 = await swarm.launch(_make_template())
+    assert t1 != t2
+    assert swarm.get_harness(t1) is not None
+    assert swarm.get_harness(t2) is not None
