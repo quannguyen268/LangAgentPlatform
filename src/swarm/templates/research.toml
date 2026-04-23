@@ -1,3 +1,6 @@
+# NOTE: Phase 2A. "web_search"/"web_fetch" are registered today; "read_file"/
+# "write_file" are placeholders pending the Phase 2B file-ops tool family. Use
+# ``load_template(..., known_tools=...)`` for load-time validation.
 name = "research"
 goal = "Research a topic and produce a written summary"
 phases = ["plan", "execute", "verify"]

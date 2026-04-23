@@ -1,3 +1,7 @@
+# NOTE: Phase 2A. Tools "read_file"/"write_file"/"edit_file"/"exec"/"grep"/"glob"
+# are placeholders — the file-ops tool family is scheduled for Phase 2B. Use
+# ``load_template(..., known_tools=...)`` if you need load-time validation that
+# the referenced tools are actually registered in your spawner.
 name = "software-dev"
 goal = "Build and verify a software feature"
 phases = ["plan", "execute", "verify"]
