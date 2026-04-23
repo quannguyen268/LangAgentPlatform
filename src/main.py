@@ -36,7 +36,10 @@ async def main() -> None:
         init_middleware_bridges(config.gateway)
 
     # Create agent
-    agent, checkpointer, mcp_client, subagent_registry, cost_tracker, recovery_executor = await create_agent(config)
+    (
+        agent, checkpointer, mcp_client, subagent_registry,
+        cost_tracker, recovery_executor, broadcaster,
+    ) = await create_agent(config)
     logger.info("Agent ready")
 
     # Avatar emotion system (relays via gateway SSE)
@@ -86,6 +89,11 @@ async def main() -> None:
         from .api.websocket import EventHub
 
         event_hub = EventHub()
+
+        # Attach the real hub to the sub-agent broadcaster so lifecycle
+        # events (spawn/progress/complete/failed) actually reach API clients.
+        if broadcaster is not None:
+            broadcaster.set_hub(event_hub)
 
         api_config = config.channels.api
         api = APIChannel(
@@ -137,14 +145,29 @@ async def main() -> None:
                     unhealthy = monitor.check_all()
                     if unhealthy:
                         logger.warning("Unhealthy sub-agents: %s", unhealthy)
-                        if recovery_executor is not None:
-                            for agent_id, reason in unhealthy.items():
-                                try:
-                                    await recovery_executor.handle_failure(
-                                        agent_id, reason=reason.value,
+                        if recovery_executor is None:
+                            logger.warning(
+                                "No recovery_executor wired; %d unhealthy agent(s) ignored",
+                                len(unhealthy),
+                            )
+                        else:
+                            # Run recoveries concurrently so a slow one doesn't
+                            # stall the rest of this tick or push the next tick.
+                            items = list(unhealthy.items())
+                            results = await asyncio.gather(
+                                *(
+                                    recovery_executor.handle_failure(
+                                        aid, reason=reason.value,
                                     )
-                                except Exception as re:
-                                    logger.error("Recovery failed for %s: %s", agent_id, re)
+                                    for aid, reason in items
+                                ),
+                                return_exceptions=True,
+                            )
+                            for (aid, _), res in zip(items, results):
+                                if isinstance(res, Exception):
+                                    logger.error(
+                                        "Recovery failed for %s: %s", aid, res,
+                                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:

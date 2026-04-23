@@ -139,7 +139,11 @@ async def create_agent(config: AppConfig):
 
     Returns:
         tuple: (agent, checkpointer, mcp_client_or_None, subagent_registry_or_None,
-                cost_tracker, recovery_executor_or_None)
+                cost_tracker, recovery_executor_or_None, broadcaster_or_None)
+
+        ``broadcaster`` is returned so ``main.py`` can attach the real
+        ``EventHub`` via ``broadcaster.set_hub(event_hub)`` once it's been
+        constructed. It is ``None`` when sub-agents are disabled.
     """
     # Initialize tool configs
     init_web_tools(config.web)
@@ -242,6 +246,7 @@ async def create_agent(config: AppConfig):
     # Sub-agent system (orchestration tools + registry)
     subagent_registry = None
     recovery_executor = None
+    broadcaster = None
     if config.subagent.enabled:
         from .subagent.registry import SubAgentRegistry
         from .subagent.tools import (
@@ -258,9 +263,8 @@ async def create_agent(config: AppConfig):
         from .subagent.recovery_executor import RecoveryExecutor
         from .subagent.recovery import RecoveryChain
 
-        # Note: event_hub is wired in main.py and passed back via set_event_hub() or
-        # similar if you want live broadcasts. For now we pass None; main.py wires
-        # it after creating the API channel.
+        # event_hub doesn't exist yet at this point; main.py attaches it via
+        # broadcaster.set_hub(event_hub) once the API channel is built.
         broadcaster = EventBroadcaster(None)
         tools_by_name = {t.name: t for t in custom_tools}
         spawner = DeepAgentsSpawner(
@@ -334,4 +338,4 @@ async def create_agent(config: AppConfig):
         len(skills_dirs), len(middleware),
     )
 
-    return agent, checkpointer, mcp_client, subagent_registry, cost_tracker, recovery_executor
+    return agent, checkpointer, mcp_client, subagent_registry, cost_tracker, recovery_executor, broadcaster

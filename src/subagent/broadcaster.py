@@ -25,6 +25,20 @@ class EventBroadcaster:
 
     def __init__(self, hub: Optional[EventHub]):
         self._hub = hub
+        if hub is None:
+            # Make the no-op path observable so a mis-wired production
+            # deployment doesn't silently drop every lifecycle event.
+            logger.info("EventBroadcaster: no hub wired; lifecycle events will be dropped")
+
+    def set_hub(self, hub: Optional[EventHub]) -> None:
+        """Swap in (or out) the EventHub after construction.
+
+        Useful for wiring: callers that construct the broadcaster before the
+        hub exists (e.g., create_agent) can attach the hub later without
+        threading a new dependency through every constructor.
+        """
+        self._hub = hub
+        logger.info("EventBroadcaster: hub %s", "attached" if hub else "cleared")
 
     def _emit(self, event) -> None:
         if self._hub is None:
