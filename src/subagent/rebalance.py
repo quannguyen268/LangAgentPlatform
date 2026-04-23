@@ -43,17 +43,48 @@ class TaskRebalancer:
         if not messages:
             return 0
 
-        # Round-robin distribute
+        # Candidate list is snapshotted here; further deregister-during-loop is
+        # harmless because SubAgentRegistry is single-loop (see its docstring).
+        # Round-robin distribute; preserve original sender so downstream filters
+        # by origin still work. Per-message try/except so a single send failure
+        # does not silently drop the rest of the drained inbox.
+        moved = 0
+        failed: list[dict] = []
         for idx, msg in enumerate(messages):
             recipient = candidates[idx % len(candidates)]
-            await self._registry.agent_store.send_inbox(
-                recipient.agent_id,
-                sender=f"rebalanced-from:{dead_agent_id}",
-                message=msg.get("message", ""),
-            )
+            origin = msg.get("from", "unknown")
+            try:
+                await self._registry.agent_store.send_inbox(
+                    recipient.agent_id,
+                    sender=f"rebalanced-from:{dead_agent_id}:{origin}",
+                    message=msg.get("message", ""),
+                )
+                moved += 1
+            except Exception as e:
+                logger.exception(
+                    "Rebalance send failed (msg %d → %s): %s",
+                    idx, recipient.agent_id, e,
+                )
+                failed.append(msg)
+
+        # Re-queue failures to the dead agent's inbox so the next rebalance
+        # round (or an operator) can retry. Best-effort: a failure here is
+        # logged and the messages are lost (no further place to stash them).
+        for m in failed:
+            try:
+                await self._registry.agent_store.send_inbox(
+                    dead_agent_id,
+                    sender=m.get("from", "unknown"),
+                    message=m.get("message", ""),
+                )
+            except Exception as e:
+                logger.error(
+                    "Re-queue to %s failed; message lost: %s",
+                    dead_agent_id, e,
+                )
 
         logger.info(
-            "Rebalanced %d tasks from %s across %d survivors",
-            len(messages), dead_agent_id, len(candidates),
+            "Rebalanced %d/%d tasks from %s across %d survivors (%d failed)",
+            moved, len(messages), dead_agent_id, len(candidates), len(failed),
         )
-        return len(messages)
+        return moved
