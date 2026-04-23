@@ -289,6 +289,12 @@ class SubAgentConfig(BaseModel):
     health_check_interval: float = 30.0
 
 
+class SwarmConfig(BaseModel):
+    enabled: bool = False
+    templates_dir: str = "templates"
+    workspace: str = "./workspace"
+
+
 class AppConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -309,6 +315,7 @@ class AppConfig(BaseModel):
     cost: CostConfig = Field(default_factory=CostConfig)
     dream: DreamConfig = Field(default_factory=DreamConfig)
     subagent: SubAgentConfig = Field(default_factory=SubAgentConfig)
+    swarm: SwarmConfig = Field(default_factory=SwarmConfig)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:

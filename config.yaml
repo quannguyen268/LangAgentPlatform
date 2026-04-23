@@ -173,3 +173,8 @@ subagent:
   max_iterations: 50
   max_retries: 1
   health_check_interval: 30.0
+
+swarm:
+  enabled: false
+  templates_dir: "templates"
+  workspace: "./workspace"
