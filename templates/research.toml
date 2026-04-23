@@ -1,0 +1,27 @@
+name = "research"
+goal = "Research a topic and produce a written summary"
+phases = ["plan", "execute", "verify"]
+
+[[agents]]
+name = "lead-researcher"
+role = "planner"
+tier = "advanced"
+tools = ["web_search", "web_fetch"]
+skills = []
+task_prompt = "Break the research goal into 3 concrete questions. Write them to research_plan.md."
+
+[[agents]]
+name = "researcher"
+role = "executor"
+tier = "standard"
+tools = ["web_search", "web_fetch", "read_file", "write_file"]
+skills = []
+task_prompt = "Answer each question from research_plan.md with citations."
+
+[[agents]]
+name = "editor"
+role = "evaluator"
+tier = "advanced"
+tools = ["read_file", "write_file"]
+skills = ["review"]
+task_prompt = "Synthesize the research into a single summary.md of about 500 words."

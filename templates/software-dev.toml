@@ -1,0 +1,27 @@
+name = "software-dev"
+goal = "Build and verify a software feature"
+phases = ["plan", "execute", "verify"]
+
+[[agents]]
+name = "architect"
+role = "planner"
+tier = "advanced"
+tools = ["read_file", "write_file", "glob", "grep"]
+skills = ["plan", "review"]
+task_prompt = "Design the feature: break it into 3-5 concrete subtasks, list impacted files, and write a short plan.md."
+
+[[agents]]
+name = "backend-dev"
+role = "executor"
+tier = "standard"
+tools = ["read_file", "write_file", "edit_file", "exec", "grep", "glob"]
+skills = ["commit", "debug"]
+task_prompt = "Implement the subtasks from plan.md. Commit your changes."
+
+[[agents]]
+name = "tester"
+role = "evaluator"
+tier = "standard"
+tools = ["read_file", "exec", "grep"]
+skills = ["test"]
+task_prompt = "Run the test suite and report results. If tests fail, describe the failures concisely."
