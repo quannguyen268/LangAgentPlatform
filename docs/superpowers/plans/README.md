@@ -20,7 +20,7 @@ The platform uses **DeepAgents' `create_deep_agent()`** with **LangChain middlew
 | [Phase 1A](2026-04-15-phase1a-core-agent-rewrite.md) | Core Agent Rewrite | **DONE** (refactored to middleware) | Custom modules (CostTracker, StreamEvent, FileStateTracker, PermissionManager) + middleware refactor | Phase 0 |
 | Phase 1B | Memory & Observability | **NEXT** | Dream memory (2-stage + Git), management API (/v1/agents, /v1/memory, /v1/cost), WebSocket events | Phase 1A |
 | Phase 1C | Sub-Agent System | PENDING | SubAgentMiddleware config, orchestration tools, BaseStore communication, health monitoring | Phase 1A |
-| Phase 2A | Swarm & Harness | PENDING | Team templates, phase gates, git worktree, conflict detection, failure recovery | Phase 1C |
+| [Phase 2A](2026-04-16-phase2a-swarm-harness.md) | Swarm & Harness | **DONE** (v0.4.0-phase2a) | Team templates, phase gates, git worktree, conflict detection, failure recovery | Phase 1C |
 | Phase 2B | Channels & Web UI | PENDING | Discord, Slack, WebSocket channels + Web UI dashboard | Phase 1B |
 | Phase 3 | Polish & Scale | PENDING | Additional channels, marketplace, LSP, natural language scheduling, Docker sandbox | Phase 2A + 2B |
 
