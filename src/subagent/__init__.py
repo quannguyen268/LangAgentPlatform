@@ -7,11 +7,14 @@ Importable directly from `src.subagent`:
     # Data types
     SubAgentState, AgentInfo
     FailureReason, RecoveryAction
+    BudgetDecision, Conflict
 
     # Infrastructure
     SubAgentRegistry, AgentStore
     HealthMonitor, RecoveryChain, next_tier
     build_recovery_context
+    EventBroadcaster, BudgetEnforcer, WorktreeManager, ConflictDetector
+    DeepAgentsSpawner, RecoveryExecutor, TaskRebalancer
 
     # Orchestration tools (@tool-decorated, given to the master agent)
     init_orchestration_tools
@@ -39,41 +42,54 @@ Importable directly from `src.subagent`:
   the sub-agent must observe the directive within its next heartbeat loop
   or be cancelled mid-iteration.
 """
-from .state import SubAgentState, AgentInfo
-from .store import AgentStore
-from .registry import SubAgentRegistry
+from .broadcaster import EventBroadcaster
+from .budget import BudgetDecision, BudgetEnforcer
+from .conflicts import Conflict, ConflictDetector
 from .context_recovery import build_recovery_context
-from .health import HealthMonitor, FailureReason
-from .recovery import RecoveryChain, RecoveryAction, next_tier
+from .health import FailureReason, HealthMonitor
+from .rebalance import TaskRebalancer
+from .recovery import RecoveryAction, RecoveryChain, next_tier
+from .recovery_executor import RecoveryExecutor
+from .registry import SubAgentRegistry
+from .spawner import DeepAgentsSpawner
+from .state import AgentInfo, SubAgentState
+from .store import AgentStore
 from .tools import (
-    init_orchestration_tools,
-    spawn_agent,
-    recall_agent,
-    monitor_agents,
     assign_task,
-    switch_agent_model,
+    init_orchestration_tools,
+    monitor_agents,
+    recall_agent,
     review_cost,
+    spawn_agent,
+    switch_agent_model,
 )
+from .worktree import WorktreeManager
 
 __all__ = [
-    # Data types
-    "SubAgentState",
     "AgentInfo",
-    "FailureReason",
-    "RecoveryAction",
-    # Infrastructure
     "AgentStore",
-    "SubAgentRegistry",
+    "BudgetDecision",
+    "BudgetEnforcer",
+    "Conflict",
+    "ConflictDetector",
+    "DeepAgentsSpawner",
+    "EventBroadcaster",
+    "FailureReason",
     "HealthMonitor",
+    "RecoveryAction",
     "RecoveryChain",
-    "next_tier",
-    "build_recovery_context",
-    # Orchestration tools
-    "init_orchestration_tools",
-    "spawn_agent",
-    "recall_agent",
-    "monitor_agents",
+    "RecoveryExecutor",
+    "SubAgentRegistry",
+    "SubAgentState",
+    "TaskRebalancer",
+    "WorktreeManager",
     "assign_task",
-    "switch_agent_model",
+    "build_recovery_context",
+    "init_orchestration_tools",
+    "monitor_agents",
+    "next_tier",
+    "recall_agent",
     "review_cost",
+    "spawn_agent",
+    "switch_agent_model",
 ]

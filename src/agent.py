@@ -138,7 +138,8 @@ async def create_agent(config: AppConfig):
     Uses create_deep_agent() with middleware (AD-14).
 
     Returns:
-        tuple: (agent, checkpointer, mcp_client_or_None, subagent_registry_or_None, cost_tracker)
+        tuple: (agent, checkpointer, mcp_client_or_None, subagent_registry_or_None,
+                cost_tracker, recovery_executor_or_None)
     """
     # Initialize tool configs
     init_web_tools(config.web)
@@ -240,6 +241,7 @@ async def create_agent(config: AppConfig):
 
     # Sub-agent system (orchestration tools + registry)
     subagent_registry = None
+    recovery_executor = None
     if config.subagent.enabled:
         from .subagent.registry import SubAgentRegistry
         from .subagent.tools import (
@@ -249,9 +251,34 @@ async def create_agent(config: AppConfig):
         )
         subagent_store = InMemoryStore()
         subagent_registry = SubAgentRegistry(subagent_store)
+
+        # Phase 2A: real DeepAgents spawner + recovery executor
+        from .subagent.broadcaster import EventBroadcaster
+        from .subagent.spawner import DeepAgentsSpawner
+        from .subagent.recovery_executor import RecoveryExecutor
+        from .subagent.recovery import RecoveryChain
+
+        # Note: event_hub is wired in main.py and passed back via set_event_hub() or
+        # similar if you want live broadcasts. For now we pass None; main.py wires
+        # it after creating the API channel.
+        broadcaster = EventBroadcaster(None)
+        tools_by_name = {t.name: t for t in custom_tools}
+        spawner = DeepAgentsSpawner(
+            registry=subagent_registry,
+            broadcaster=broadcaster,
+            base_model=model,
+            tools_by_name=tools_by_name,
+        )
+        recovery_executor = RecoveryExecutor(
+            registry=subagent_registry,
+            chain=RecoveryChain(max_retries=config.subagent.max_retries),
+            spawner=spawner,
+            broadcaster=broadcaster,
+        )
+
         init_orchestration_tools(
             registry=subagent_registry,
-            spawner=None,    # Phase 2A wires a real DeepAgents-based spawner
+            spawner=spawner.spawn,
             cost_tracker=cost_tracker,
         )
         custom_tools.extend([
@@ -307,4 +334,4 @@ async def create_agent(config: AppConfig):
         len(skills_dirs), len(middleware),
     )
 
-    return agent, checkpointer, mcp_client, subagent_registry, cost_tracker
+    return agent, checkpointer, mcp_client, subagent_registry, cost_tracker, recovery_executor
