@@ -125,3 +125,115 @@ async def test_spawner_handles_inner_failure(monkeypatch):
 
     assert registry.get_agent("a1").state == SubAgentState.FAILED
     assert "boom" in (registry.get_agent("a1").error or "")
+
+
+@pytest.mark.asyncio
+async def test_spawner_raises_on_unknown_tool(monkeypatch):
+    """Missing tool name is a config bug — FAIL loudly with FAILED state."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+
+    # create_deep_agent shouldn't even be called if the pre-flight catches
+    called = {"count": 0}
+
+    def fake_create(**kwargs):
+        called["count"] += 1
+        return MagicMock()
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", fake_create)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={"read_file": object()},
+    )
+    info = AgentInfo(
+        agent_id="a1", name="n1", role="executor", task="t",
+        tier="standard",
+        tools=["read_file", "bogus_tool"],  # one known, one unknown
+        skills=[],
+    )
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert called["count"] == 0, "create_deep_agent must not be called when tools are missing"
+    assert registry.get_agent("a1").state == SubAgentState.FAILED
+    assert "bogus_tool" in (registry.get_agent("a1").error or "")
+
+
+@pytest.mark.asyncio
+async def test_spawner_prepends_recovery_context(monkeypatch):
+    """When recovery_context is provided, it must be prepended to the task."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+
+    captured = {}
+
+    async def capture_invoke(state):
+        captured["content"] = state["messages"][0].content
+        return {"messages": [AIMessage(content="ok")]}
+
+    inner = MagicMock()
+    inner.ainvoke = capture_invoke
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={},
+    )
+    info = AgentInfo(
+        agent_id="a1", name="n1", role="executor", task="the original task",
+        tier="standard", tools=[], skills=[],
+    )
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info, recovery_context="Resuming after failure X")
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    msg = captured["content"]
+    assert "Resuming after failure X" in msg
+    assert "Task: the original task" in msg
+
+
+@pytest.mark.asyncio
+async def test_spawner_failed_event_uses_exception_type(monkeypatch):
+    """agent_failed reason should be the exception type, not a generic string."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    hub = EventHub()
+    broadcaster = EventBroadcaster(hub)
+
+    failed_events = []
+
+    async def sub():
+        async for ev in hub.subscribe():
+            if ev.type == "agent_failed":
+                failed_events.append(ev)
+                break
+
+    sub_task = asyncio.create_task(sub())
+    await asyncio.sleep(0.05)
+
+    inner = MagicMock()
+    inner.ainvoke = AsyncMock(side_effect=ValueError("bad input"))
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={},
+    )
+    info = AgentInfo(
+        agent_id="a1", name="n1", role="executor", task="t",
+        tier="standard", tools=[], skills=[],
+    )
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(sub_task, timeout=2.0)
+
+    assert len(failed_events) == 1
+    assert failed_events[0].data["reason"] == "ValueError"
+    assert failed_events[0].data["action"] == "pending"

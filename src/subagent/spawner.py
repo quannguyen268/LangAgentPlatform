@@ -7,11 +7,18 @@ For each ``AgentInfo`` passed to ``spawn()``, the spawner:
   4. Writes progress + final result to AgentStore and emits ``agent_complete`` /
      ``agent_failed`` to the broadcaster.
   5. Updates SubAgentRegistry state transitions (SPAWNING → RUNNING → FINISHED / FAILED).
+
+Phase 2A limitation: ``iteration`` is written as 0 ("starting") then 1 ("running")
+and never incremented during ``inner.ainvoke()`` because the Phase 2A spawner runs
+the sub-agent as a single-shot call rather than a per-step stream. HealthMonitor
+still detects hangs via heartbeat timestamp staleness. Phase 2B may switch to
+``inner.astream()`` and emit ``agent_progress`` events per step.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Optional
 
 from deepagents import create_deep_agent
@@ -62,8 +69,15 @@ class DeepAgentsSpawner:
         store = self._registry.agent_store
 
         try:
-            # Resolve tools
-            tools = [self._tools_by_name[n] for n in info.tools if n in self._tools_by_name]
+            # Resolve tools — error loudly on unknown names (likely a config bug,
+            # not a recoverable runtime condition)
+            missing = [n for n in info.tools if n not in self._tools_by_name]
+            if missing:
+                raise ValueError(
+                    f"Unknown tools requested by {agent_id}: {missing}. "
+                    f"Available: {sorted(self._tools_by_name)}"
+                )
+            tools = [self._tools_by_name[n] for n in info.tools]
 
             # Emit spawn + heartbeat
             self._broadcaster.agent_spawned(
@@ -71,13 +85,13 @@ class DeepAgentsSpawner:
             )
             await store.write_heartbeat(agent_id, iteration=0, status="starting")
 
-            # Build inner agent (Phase 2A: no nested middleware; keep it simple)
+            # Build inner agent (Phase 2A: no nested middleware; keep it simple.
+            # Sub-agents intentionally omit checkpointer, interrupt_on, and
+            # middleware — those belong to the master graph, not per-sub-agent.)
             inner = create_deep_agent(
                 model=self._base_model,
                 tools=tools,
             )
-
-            self._registry.update_state(agent_id, SubAgentState.RUNNING)
 
             # Compose initial message — prepend recovery context if this is a respawn
             task_text = info.task
@@ -86,6 +100,9 @@ class DeepAgentsSpawner:
             state = {"messages": [HumanMessage(content=task_text)]}
 
             await store.write_heartbeat(agent_id, iteration=1, status="running")
+            # Transition to RUNNING immediately before ainvoke so the state
+            # accurately reflects actual execution (not just readiness).
+            self._registry.update_state(agent_id, SubAgentState.RUNNING)
             result = await inner.ainvoke(state)
 
             # Extract output
@@ -94,7 +111,7 @@ class DeepAgentsSpawner:
                 agent_id, status="success", output=output, cost_total=info.cost_cents,
             )
             info.result = output
-            info.finished_at = asyncio.get_running_loop().time()
+            info.finished_at = time.time()
             self._registry.update_state(agent_id, SubAgentState.FINISHED)
             self._broadcaster.agent_completed(
                 agent_id=agent_id, result=output, cost_total_cents=info.cost_cents,
@@ -107,12 +124,18 @@ class DeepAgentsSpawner:
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             info.error = err
+            info.finished_at = time.time()
             self._registry.update_state(agent_id, SubAgentState.FAILED)
             try:
                 await store.write_result(
                     agent_id, status="failed", output=err, cost_total=info.cost_cents,
                 )
-            except Exception:
-                pass
-            self._broadcaster.agent_failed(agent_id=agent_id, reason="exception", action="pending")
+            except Exception as store_err:
+                logger.warning(
+                    "Sub-agent %s: failed to write failure result: %s",
+                    agent_id, store_err,
+                )
+            self._broadcaster.agent_failed(
+                agent_id=agent_id, reason=type(e).__name__, action="pending",
+            )
             logger.exception("Sub-agent %s failed", agent_id)
