@@ -112,13 +112,20 @@ def setup_management_routes(
             return internal_error("Failed to list teams", exc=e)
 
     async def handle_tasks_list(request: web.Request) -> web.Response:
-        try:
-            from ..tools.cron import list_active_tasks_structured
-            tasks = await list_active_tasks_structured()
-            return web.json_response({"tasks": tasks})
-        except RuntimeError:
-            # cron tools not initialized — treat as "scheduler disabled" (spec §4.8)
+        # Imports are deferred so the cron module isn't required at import time
+        # for callers that only need the agent/team/config endpoints.
+        from ..tools import cron
+        # Probe the not-initialized condition explicitly so we don't have to
+        # swallow every RuntimeError that bubbles out of the cron internals
+        # (e.g., a malformed cron expression should still surface as 500).
+        if cron._tasks_lock is None:
+            logger.debug(
+                "GET /v1/tasks returning empty list — cron tools not initialized"
+            )
             return web.json_response({"tasks": []})
+        try:
+            tasks = await cron.list_active_tasks_structured()
+            return web.json_response({"tasks": tasks})
         except Exception as e:
             return internal_error("Failed to list scheduled tasks", exc=e)
 

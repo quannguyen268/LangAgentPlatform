@@ -311,3 +311,79 @@ async def test_get_tasks_empty_when_data_file_missing(tmp_path, monkeypatch, mak
     resp = await client.get("/v1/tasks")
     assert resp.status == 200
     assert await resp.json() == {"tasks": []}
+
+
+@pytest.mark.asyncio
+async def test_get_tasks_empty_when_cron_not_initialized(monkeypatch, make_app, aiohttp_client):
+    """Spec §4.8: cron tools not initialized (lock is None) → 200 with empty list.
+
+    This is the actual disabled-subsystem path; the data-file-missing test only
+    covers the happy path with no rows.
+    """
+    from src.tools import cron
+    monkeypatch.setattr(cron, "_tasks_lock", None)
+
+    app = make_app()
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/tasks")
+    assert resp.status == 200
+    assert await resp.json() == {"tasks": []}
+
+
+@pytest.mark.asyncio
+async def test_get_tasks_excludes_inactive_at_api_layer(tmp_path, monkeypatch, make_app, aiohttp_client):
+    """Pin the active-only contract at the API surface (cron unit tests cover internals)."""
+    from src.tools import cron
+    import json as json_mod
+
+    data_file = tmp_path / "tasks.json"
+    data_file.write_text(json_mod.dumps([
+        {"id": "active-1", "prompt": "p", "type": "cron", "value": "* * * * *",
+         "channel": None, "chat_id": None, "created_at": "2026-04-20T00:00:00+00:00",
+         "last_run": None, "active": True},
+        {"id": "inactive-1", "prompt": "p", "type": "cron", "value": "* * * * *",
+         "channel": None, "chat_id": None, "created_at": "2026-04-20T00:00:00+00:00",
+         "last_run": None, "active": False},
+    ]))
+    monkeypatch.setattr(cron, "_data_file", str(data_file))
+    monkeypatch.setattr(cron, "_tasks_lock", asyncio.Lock())
+
+    app = make_app()
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/tasks")
+    data = await resp.json()
+    ids = [t["task_id"] for t in data["tasks"]]
+    assert ids == ["active-1"]
+
+
+@pytest.mark.asyncio
+async def test_get_tasks_returns_internal_error_on_unexpected_exception(
+    monkeypatch, make_app, aiohttp_client,
+):
+    """Non-init RuntimeError (or any other exception) must NOT be swallowed —
+    surface as a 500 error envelope so operators see real bugs."""
+    from src.tools import cron
+
+    async def boom():
+        raise RuntimeError("malformed cron expression")
+
+    monkeypatch.setattr(cron, "_tasks_lock", asyncio.Lock())
+    monkeypatch.setattr(cron, "list_active_tasks_structured", boom)
+
+    app = make_app()
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/tasks")
+    assert resp.status == 500
+    body = await resp.json()
+    assert body["error"]["type"] == "internal_error"
+    assert body["error"]["message"] == "Failed to list scheduled tasks"
+
+
+@pytest.mark.asyncio
+async def test_get_tasks_next_run_type_is_str_or_null(app_with_tasks, aiohttp_client):
+    """`next_run` must be a string or null in the JSON response."""
+    client = await aiohttp_client(app_with_tasks)
+    resp = await client.get("/v1/tasks")
+    data = await resp.json()
+    for t in data["tasks"]:
+        assert t["next_run"] is None or isinstance(t["next_run"], str)
