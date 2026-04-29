@@ -124,3 +124,67 @@ async def test_get_agent_by_id_404_when_registry_disabled(app_no_registry, aioht
     client = await aiohttp_client(app_no_registry)
     resp = await client.get("/v1/agents/anyid")
     assert resp.status == 404
+
+
+async def _make_swarm_with_team():
+    """Build a Swarm that has launched one 2-agent team. Async helper, not a fixture."""
+    from src.subagent.broadcaster import EventBroadcaster
+    from src.swarm.coordinator import Swarm
+    from src.swarm.templates import TeamTemplate, AgentTemplate
+    from unittest.mock import AsyncMock, MagicMock
+
+    registry = SubAgentRegistry(InMemoryStore())
+    broadcaster = EventBroadcaster(None)
+
+    spawner = MagicMock()
+    async def spawn_stub(info, recovery_context=None):
+        async def noop():
+            await asyncio.sleep(0.01)
+        return asyncio.create_task(noop())
+    spawner.spawn = AsyncMock(side_effect=spawn_stub)
+
+    swarm = Swarm(registry=registry, broadcaster=broadcaster,
+                  spawner=spawner, workspace="/tmp")
+
+    tmpl = TeamTemplate(
+        name="t", goal="g", phases=["plan", "execute"],
+        agents=[
+            AgentTemplate(name="a1", role="planner", tier="standard",
+                          tools=[], skills=[], task_prompt="Plan"),
+            AgentTemplate(name="a2", role="executor", tier="standard",
+                          tools=[], skills=[], task_prompt="Execute"),
+        ],
+    )
+    team_id = await swarm.launch(tmpl)
+    return registry, swarm, team_id
+
+
+@pytest.mark.asyncio
+async def test_get_teams_returns_launched_teams(make_app, aiohttp_client):
+    registry, swarm, team_id = await _make_swarm_with_team()
+    app = make_app(subagent_registry=registry, swarm=swarm)
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/v1/teams")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "teams" in data
+    assert len(data["teams"]) == 1
+    team = data["teams"][0]
+    for key in ("team_id", "phases", "current_phase", "is_finished",
+                "agent_count", "agent_ids"):
+        assert key in team
+    assert team["team_id"] == team_id
+    assert team["phases"] == ["plan", "execute"]
+    assert team["is_finished"] is False
+    assert team["current_phase"] == "plan"
+    assert team["agent_count"] == 2
+    assert len(team["agent_ids"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_teams_empty_when_swarm_disabled(app_no_registry, aiohttp_client):
+    client = await aiohttp_client(app_no_registry)
+    resp = await client.get("/v1/teams")
+    assert resp.status == 200
+    assert await resp.json() == {"teams": []}

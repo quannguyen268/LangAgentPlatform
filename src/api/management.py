@@ -90,5 +90,25 @@ def setup_management_routes(
         except Exception as e:
             return internal_error("Failed to get agent detail", exc=e)
 
+    async def handle_teams_list(request: web.Request) -> web.Response:
+        try:
+            if swarm is None:
+                return web.json_response({"teams": []})
+            teams = []
+            for team_id, runner in swarm._teams.items():
+                agent_ids = swarm.get_team_agents(team_id)
+                teams.append({
+                    "team_id": team_id,
+                    "phases": list(runner._phases),
+                    "current_phase": runner.current_phase,
+                    "is_finished": runner.is_finished,
+                    "agent_count": len(agent_ids),
+                    "agent_ids": list(agent_ids),
+                })
+            return web.json_response({"teams": teams})
+        except Exception as e:
+            return internal_error("Failed to list teams", exc=e)
+
     app.router.add_get("/v1/agents", handle_agents_list)
     app.router.add_get("/v1/agents/{agent_id}", handle_agent_detail)
+    app.router.add_get("/v1/teams", handle_teams_list)
