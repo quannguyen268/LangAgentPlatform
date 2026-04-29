@@ -280,6 +280,7 @@ async def create_agent(config: AppConfig) -> "PlatformBundle":
     subagent_registry = None
     recovery_executor = None
     broadcaster = None
+    swarm = None
     if config.subagent.enabled:
         from .subagent.registry import SubAgentRegistry
         from .subagent.tools import (
@@ -312,6 +313,17 @@ async def create_agent(config: AppConfig) -> "PlatformBundle":
             spawner=spawner,
             broadcaster=broadcaster,
         )
+
+        # Swarm — top-level team launch (Phase 2B-I wires what Phase 2A T14 deferred)
+        if config.swarm.enabled:
+            from .swarm.coordinator import Swarm
+            swarm = Swarm(
+                registry=subagent_registry,
+                broadcaster=broadcaster,
+                spawner=spawner,
+                workspace=config.swarm.workspace,
+            )
+            logger.info("Swarm enabled (workspace=%s)", config.swarm.workspace)
 
         init_orchestration_tools(
             registry=subagent_registry,
@@ -379,5 +391,5 @@ async def create_agent(config: AppConfig) -> "PlatformBundle":
         cost_tracker=cost_tracker,
         recovery_executor=recovery_executor,
         broadcaster=broadcaster,
-        swarm=None,  # Task 2 wires Swarm here when config.swarm.enabled
+        swarm=swarm,
     )

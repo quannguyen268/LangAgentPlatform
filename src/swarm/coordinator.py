@@ -53,6 +53,7 @@ class Swarm:
         self._spawner = spawner
         self._workspace = workspace  # T13: fed into HarnessContext at run time
         self._teams: dict[str, HarnessRunner] = {}
+        self._team_agents: dict[str, list[str]] = {}
 
     def _new_team_id(self) -> str:
         while True:
@@ -124,6 +125,7 @@ class Swarm:
         self._teams[team_id] = HarnessRunner(
             phases=template.phases, gates=gates,
         )
+        self._team_agents[team_id] = list(spawned_ids)
         logger.info(
             "Team %s launched with %d agents across %d phases",
             team_id, len(template.agents), len(template.phases),
@@ -142,3 +144,7 @@ class Swarm:
 
     def get_harness(self, team_id: str) -> HarnessRunner | None:
         return self._teams.get(team_id)
+
+    def get_team_agents(self, team_id: str) -> list[str]:
+        """Return the agent_ids launched for a given team_id, or [] if unknown."""
+        return list(self._team_agents.get(team_id, []))

@@ -150,3 +150,52 @@ async def test_two_launches_produce_distinct_team_ids():
     assert t1 != t2
     assert swarm.get_harness(t1) is not None
     assert swarm.get_harness(t2) is not None
+
+
+@pytest.mark.asyncio
+async def test_launch_records_team_agents_mapping():
+    """After launch, swarm.get_team_agents(team_id) returns the launched agent_ids."""
+    swarm, registry, spawner = _make_swarm()
+    tmpl = _make_template()
+
+    team_id = await swarm.launch(tmpl)
+
+    agent_ids = swarm.get_team_agents(team_id)
+    assert isinstance(agent_ids, list)
+    assert len(agent_ids) == len(tmpl.agents)
+    # Each ID must correspond to a registered agent
+    for aid in agent_ids:
+        assert registry.get_agent(aid) is not None
+
+
+@pytest.mark.asyncio
+async def test_get_team_agents_returns_empty_list_for_unknown():
+    swarm, _, _ = _make_swarm()
+    assert swarm.get_team_agents("team-ghost") == []
+
+
+@pytest.mark.asyncio
+async def test_rollback_clears_team_agents_mapping():
+    """Failed launch must not leave a partial _team_agents entry behind."""
+    registry = SubAgentRegistry(InMemoryStore())
+    broadcaster = EventBroadcaster(None)
+    spawner = MagicMock()
+    call = {"n": 0}
+
+    async def spawn_stub(info, recovery_context=None):
+        call["n"] += 1
+        if call["n"] == 2:
+            raise RuntimeError("spawn boom")
+        async def noop():
+            await asyncio.sleep(0.01)
+        return asyncio.create_task(noop())
+
+    spawner.spawn = AsyncMock(side_effect=spawn_stub)
+    swarm = Swarm(registry=registry, broadcaster=broadcaster,
+                  spawner=spawner, workspace="/tmp")
+
+    with pytest.raises(RuntimeError):
+        await swarm.launch(_make_template())
+
+    # No team_id was returned, so nothing should be in _team_agents
+    assert swarm._team_agents == {}
