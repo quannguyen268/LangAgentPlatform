@@ -1,0 +1,84 @@
+"""Phase 2B-I read-only management endpoints.
+
+Provides handlers for /v1/agents, /v1/agents/{id}, /v1/teams, /v1/tasks, /v1/config.
+Distinct from src/api/routes.py which hosts Phase 1B's memory + cost endpoints.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from aiohttp import web
+
+from .errors import internal_error, not_found
+
+logger = logging.getLogger(__name__)
+
+
+def _agent_to_dict(info) -> dict:
+    """Project AgentInfo to the /v1/agents response shape (spec §4.1)."""
+    state = info.state.value if hasattr(info.state, "value") else str(info.state)
+    return {
+        "agent_id": info.agent_id,
+        "name": info.name,
+        "role": info.role,
+        "tier": info.tier,
+        "state": state,
+        "task": info.task,
+        "tools": list(info.tools),
+        "skills": list(info.skills),
+        "iteration": info.iteration,
+        "cost_cents": info.cost_cents,
+        "retry_count": info.retry_count,
+        "created_at": _iso(info.created_at),
+        "last_heartbeat": _iso(info.last_heartbeat),
+    }
+
+
+def _iso(timestamp: float | None) -> str | None:
+    """Convert a unix timestamp (float) to ISO-8601 UTC string."""
+    if timestamp is None:
+        return None
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
+def setup_management_routes(
+    app: web.Application,
+    *,
+    subagent_registry=None,
+    swarm=None,
+    config=None,
+) -> None:
+    """Register Phase 2B-I read-only routes on an aiohttp app.
+
+    All dependencies are passed explicitly — no globals. Each is optional;
+    when a dependency is None the corresponding endpoints return 200 with
+    an empty list (spec §4.8) except detail endpoints which 404.
+    """
+
+    async def handle_agents_list(request: web.Request) -> web.Response:
+        try:
+            if subagent_registry is None:
+                return web.json_response({"agents": []})
+            agents = [_agent_to_dict(a) for a in subagent_registry.list_agents()]
+            return web.json_response({"agents": agents})
+        except Exception as e:
+            return internal_error("Failed to list agents", exc=e)
+
+    async def handle_agent_detail(request: web.Request) -> web.Response:
+        agent_id = request.match_info["agent_id"]
+        try:
+            if subagent_registry is None:
+                return not_found(f"Agent not found: {agent_id}", code="agent_not_found")
+            info = subagent_registry.get_agent(agent_id)
+            if info is None:
+                return not_found(f"Agent not found: {agent_id}", code="agent_not_found")
+            payload = _agent_to_dict(info)
+            payload["error"] = info.error
+            return web.json_response(payload)
+        except Exception as e:
+            return internal_error("Failed to get agent detail", exc=e)
+
+    app.router.add_get("/v1/agents", handle_agents_list)
+    app.router.add_get("/v1/agents/{agent_id}", handle_agent_detail)
