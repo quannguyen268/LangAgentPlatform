@@ -69,6 +69,9 @@ class APIChannel(AbstractChannel):
 
     name = "api"
 
+    # NB: this set does not normalize alternative IPv6 forms
+    # (e.g. "0:0:0:0:0:0:0:1", "[::1]", "::ffff:127.0.0.1"); rare hosts
+    # configured with those literals will spuriously trip the WARN.
     _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
     def __init__(
@@ -119,8 +122,10 @@ class APIChannel(AbstractChannel):
 
         # Phase 1B memory + cost routes
         if self._workspace:
-            from ..api.routes import setup_management_routes as setup_legacy
-            setup_legacy(app, workspace=self._workspace, cost_tracker=self._cost_tracker)
+            from ..api.routes import setup_legacy_routes
+            setup_legacy_routes(
+                app, workspace=self._workspace, cost_tracker=self._cost_tracker,
+            )
 
         # WebSocket
         if self._event_hub:
@@ -128,8 +133,8 @@ class APIChannel(AbstractChannel):
             setup_websocket(app, self._event_hub)
 
         # Phase 2B-I read-only management routes
-        from ..api.management import setup_management_routes as setup_phase2b
-        setup_phase2b(
+        from ..api.management import setup_management_routes
+        setup_management_routes(
             app,
             subagent_registry=self._subagent_registry,
             swarm=self._swarm,

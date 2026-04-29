@@ -8,8 +8,8 @@ import json
 
 @pytest.fixture
 def management_app(tmp_path):
-    """Create a test aiohttp app with management routes."""
-    from src.api.routes import setup_management_routes
+    """Create a test aiohttp app with the Phase 1B memory + cost + dream routes."""
+    from src.api.routes import setup_legacy_routes
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -23,7 +23,7 @@ def management_app(tmp_path):
     cost_tracker.record("anthropic", "claude-sonnet-4-6", 1000, 500, "user1", "standard")
 
     app = web.Application()
-    setup_management_routes(app, workspace=str(workspace), cost_tracker=cost_tracker)
+    setup_legacy_routes(app, workspace=str(workspace), cost_tracker=cost_tracker)
     return app
 
 

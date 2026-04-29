@@ -24,13 +24,19 @@ ALLOWED_MEMORY_FILES = {
 }
 
 
-def setup_management_routes(
+def setup_legacy_routes(
     app: web.Application,
     workspace: str,
     cost_tracker=None,
     gitstore=None,
 ) -> None:
-    """Register management routes on an aiohttp Application."""
+    """Register Phase 1B memory + cost + dream routes on an aiohttp Application.
+
+    Renamed from ``setup_management_routes`` in Phase 2B-I to disambiguate from
+    the new ``src/api/management.setup_management_routes`` (Phase 2B-I read-only
+    state endpoints). This function continues to own ``/v1/memory*``,
+    ``/v1/cost*``, and ``/v1/memory/dream/*``.
+    """
     workspace_path = Path(workspace)
 
     # ── Memory endpoints ──
