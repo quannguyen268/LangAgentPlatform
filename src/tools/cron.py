@@ -123,19 +123,39 @@ async def schedule_task(prompt: str, schedule_type: str, schedule_value: str, mo
     return f"Task scheduled: id={task['id']}, type={schedule_type}, value={schedule_value}"
 
 
+def _to_utc_iso(dt: datetime) -> str:
+    """Return ``dt`` as a UTC ISO-8601 string. Naive inputs are assumed to be UTC."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
 def _compute_next_run(task: dict) -> str | None:
-    """Best-effort next-run ISO timestamp. Returns None if cannot compute."""
+    """Best-effort next-run ISO timestamp (always UTC).
+
+    Returns ``None`` if the task has no future fire time:
+      - "once" tasks already fired (``last_run`` is set)
+      - "cron" / "interval" tasks whose schedule fails to parse
+      - unknown schedule types
+    """
     schedule_type = task.get("type")
     schedule_value = task.get("value", "")
     if schedule_type == "once":
-        # For 'once' tasks, the schedule_value IS the next run (until executed).
+        # A "once" task fires exactly once. Once last_run is recorded, there
+        # is no further next_run — the task is conceptually finished.
+        if task.get("last_run"):
+            return None
         return schedule_value
     if schedule_type == "cron":
         try:
             from croniter import croniter
             base = datetime.now(timezone.utc)
-            return croniter(schedule_value, base).get_next(datetime).isoformat()
-        except Exception:
+            return _to_utc_iso(croniter(schedule_value, base).get_next(datetime))
+        except Exception as e:
+            logger.warning(
+                "Failed to compute cron next_run for task %s: %s",
+                task.get("id"), e,
+            )
             return None
     if schedule_type == "interval":
         try:
@@ -148,8 +168,12 @@ def _compute_next_run(task: dict) -> str | None:
                 base = datetime.fromisoformat(
                     task.get("created_at", datetime.now(timezone.utc).isoformat())
                 )
-            return (base + timedelta(seconds=secs)).isoformat()
-        except Exception:
+            return _to_utc_iso(base + timedelta(seconds=secs))
+        except Exception as e:
+            logger.warning(
+                "Failed to compute interval next_run for task %s: %s",
+                task.get("id"), e,
+            )
             return None
     return None
 

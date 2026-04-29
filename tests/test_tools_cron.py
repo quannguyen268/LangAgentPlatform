@@ -385,3 +385,68 @@ async def test_list_tasks_tool_still_returns_string(cron_data_file):
     result = await list_tasks.ainvoke({})
     assert isinstance(result, str)
     assert "abc12345" in result
+
+
+@pytest.mark.asyncio
+async def test_once_task_already_fired_returns_none_next_run(cron_data_file):
+    """A "once" task with last_run set is conceptually finished — next_run is None."""
+    from src.tools.cron import list_active_tasks_structured
+
+    raw = [
+        {
+            "id": "fired",
+            "prompt": "p",
+            "type": "once",
+            "value": "2026-04-20T00:00:00+00:00",
+            "channel": None,
+            "chat_id": None,
+            "created_at": "2026-04-19T00:00:00+00:00",
+            "last_run": "2026-04-20T00:00:01+00:00",  # already fired
+            "active": True,
+        },
+        {
+            "id": "pending",
+            "prompt": "p",
+            "type": "once",
+            "value": "2099-01-01T00:00:00+00:00",
+            "channel": None,
+            "chat_id": None,
+            "created_at": "2026-04-20T00:00:00+00:00",
+            "last_run": None,
+            "active": True,
+        },
+    ]
+    cron_data_file.write_text(json.dumps(raw))
+
+    out = await list_active_tasks_structured()
+    by_id = {t["task_id"]: t for t in out}
+    assert by_id["fired"]["next_run"] is None
+    assert by_id["pending"]["next_run"] == "2099-01-01T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_interval_task_next_run_is_utc_canonical(cron_data_file):
+    """Interval next_run must be UTC-canonical even when stored timestamps are naive."""
+    from src.tools.cron import list_active_tasks_structured
+
+    # Naive last_run (no TZ) — must be treated as UTC and emitted with TZ suffix.
+    raw = [{
+        "id": "iv1",
+        "prompt": "p",
+        "type": "interval",
+        "value": "60",
+        "channel": None,
+        "chat_id": None,
+        "created_at": "2026-04-20T00:00:00",  # naive
+        "last_run": "2026-04-20T12:00:00",   # naive
+        "active": True,
+    }]
+    cron_data_file.write_text(json.dumps(raw))
+
+    out = await list_active_tasks_structured()
+    nr = out[0]["next_run"]
+    assert nr is not None
+    # Either trailing 'Z' or '+00:00' marks a tz-aware UTC ISO string
+    assert nr.endswith("+00:00") or nr.endswith("Z"), (
+        f"Expected UTC-canonical ISO string, got {nr!r}"
+    )
