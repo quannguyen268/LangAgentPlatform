@@ -96,7 +96,10 @@ class AgentConfig(BaseModel):
 class ProviderConfig(BaseModel):
     name: str = "anthropic"
     model: str = "claude-sonnet-4-6"
-    api_key: Optional[str] = None
+    # Redundantly flagged sensitive=True to exercise the redaction annotation
+    # walker against real config. Already covered by the _key suffix rule;
+    # the annotation is a regression-pin so the hybrid policy stays exercised.
+    api_key: Optional[str] = Field(default=None, json_schema_extra={"sensitive": True})
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     base_url: Optional[str] = None
