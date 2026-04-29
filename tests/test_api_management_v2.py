@@ -387,3 +387,36 @@ async def test_get_tasks_next_run_type_is_str_or_null(app_with_tasks, aiohttp_cl
     data = await resp.json()
     for t in data["tasks"]:
         assert t["next_run"] is None or isinstance(t["next_run"], str)
+
+
+@pytest.fixture
+def app_with_config(make_app):
+    """aiohttp app with management routes + an AppConfig instance."""
+    from src.config import AppConfig
+
+    cfg = AppConfig()
+    cfg.provider.api_key = "sk-secret-must-not-leak"
+    return make_app(config=cfg)
+
+
+@pytest.mark.asyncio
+async def test_get_config_returns_redacted_dump(app_with_config, aiohttp_client):
+    client = await aiohttp_client(app_with_config)
+    resp = await client.get("/v1/config")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "provider" in data
+    assert "agent" in data
+    assert "subagent" in data
+    assert data["provider"]["api_key"] == "***REDACTED***"
+    assert "sk-secret" not in str(data)
+
+
+@pytest.mark.asyncio
+async def test_get_config_503_when_config_not_wired(app_no_registry, aiohttp_client):
+    """When setup_management_routes received config=None, the endpoint surfaces a 503."""
+    client = await aiohttp_client(app_no_registry)
+    resp = await client.get("/v1/config")
+    assert resp.status == 503
+    body = await resp.json()
+    assert body["error"]["type"] == "internal_error"

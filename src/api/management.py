@@ -11,6 +11,7 @@ from typing import Optional
 from aiohttp import web
 
 from .errors import internal_error, not_found
+from .redaction import redact_model
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +130,26 @@ def setup_management_routes(
         except Exception as e:
             return internal_error("Failed to list scheduled tasks", exc=e)
 
+    async def handle_config_get(request: web.Request) -> web.Response:
+        if config is None:
+            # Config is a wiring requirement, not an optional subsystem —
+            # surface a 503 with a distinct code so operators can tell this
+            # apart from a generic 500.
+            return web.json_response(
+                {"error": {
+                    "message": "Config not wired into APIChannel",
+                    "type": "internal_error",
+                    "code": "config_unavailable",
+                }},
+                status=503,
+            )
+        try:
+            return web.json_response(redact_model(config))
+        except Exception as e:
+            return internal_error("Failed to render config", exc=e)
+
     app.router.add_get("/v1/agents", handle_agents_list)
     app.router.add_get("/v1/agents/{agent_id}", handle_agent_detail)
     app.router.add_get("/v1/teams", handle_teams_list)
     app.router.add_get("/v1/tasks", handle_tasks_list)
+    app.router.add_get("/v1/config", handle_config_get)
