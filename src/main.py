@@ -36,10 +36,7 @@ async def main() -> None:
         init_middleware_bridges(config.gateway)
 
     # Create agent
-    (
-        agent, checkpointer, mcp_client, subagent_registry,
-        cost_tracker, recovery_executor, broadcaster,
-    ) = await create_agent(config)
+    bundle = await create_agent(config)
     logger.info("Agent ready")
 
     # Avatar emotion system (relays via gateway SSE)
@@ -54,7 +51,7 @@ async def main() -> None:
 
     # Router
     router = MessageRouter(
-        agent, config, checkpointer=checkpointer,
+        bundle.agent, config, checkpointer=bundle.checkpointer,
         pre_hook=pre_hook, post_hook=post_hook,
     )
 
@@ -92,15 +89,15 @@ async def main() -> None:
 
         # Attach the real hub to the sub-agent broadcaster so lifecycle
         # events (spawn/progress/complete/failed) actually reach API clients.
-        if broadcaster is not None:
-            broadcaster.set_hub(event_hub)
+        if bundle.broadcaster is not None:
+            bundle.broadcaster.set_hub(event_hub)
 
         api_config = config.channels.api
         api = APIChannel(
             host=api_config.host,
             port=api_config.port,
             workspace=config.agent.workspace,
-            cost_tracker=cost_tracker,
+            cost_tracker=bundle.cost_tracker,
             event_hub=event_hub,
         )
 
@@ -120,15 +117,15 @@ async def main() -> None:
     scheduler = None
     if config.scheduler.enabled:
         channels_map = {ch.name: ch for ch in channels}
-        scheduler = Scheduler(agent, config, channels=channels_map)
+        scheduler = Scheduler(bundle.agent, config, channels=channels_map)
         await scheduler.start()
 
     # Health monitor (background task checking sub-agent heartbeats)
     health_task = None
-    if config.subagent.enabled and subagent_registry is not None:
+    if config.subagent.enabled and bundle.subagent_registry is not None:
         from .subagent.health import HealthMonitor
         monitor = HealthMonitor(
-            registry=subagent_registry,
+            registry=bundle.subagent_registry,
             heartbeat_timeout=config.subagent.heartbeat_timeout,
             task_timeout=config.subagent.task_timeout,
             max_iterations=config.subagent.max_iterations,
@@ -141,11 +138,11 @@ async def main() -> None:
                 try:
                     # Pull fresh heartbeat + iteration from BaseStore so the
                     # monitor sees what sub-agents have actually written.
-                    await subagent_registry.sync_from_store()
+                    await bundle.subagent_registry.sync_from_store()
                     unhealthy = monitor.check_all()
                     if unhealthy:
                         logger.warning("Unhealthy sub-agents: %s", unhealthy)
-                        if recovery_executor is None:
+                        if bundle.recovery_executor is None:
                             logger.warning(
                                 "No recovery_executor wired; %d unhealthy agent(s) ignored",
                                 len(unhealthy),
@@ -156,7 +153,7 @@ async def main() -> None:
                             items = list(unhealthy.items())
                             results = await asyncio.gather(
                                 *(
-                                    recovery_executor.handle_failure(
+                                    bundle.recovery_executor.handle_failure(
                                         aid, reason=reason.value,
                                     )
                                     for aid, reason in items
@@ -231,8 +228,8 @@ async def main() -> None:
         except asyncio.CancelledError:
             pass
     # Deregister all sub-agents so their tasks don't leak as orphan coroutines
-    if subagent_registry is not None:
-        await subagent_registry.shutdown_all()
+    if bundle.subagent_registry is not None:
+        await bundle.subagent_registry.shutdown_all()
     if dream_task:
         dream_task.cancel()
         try:
@@ -243,14 +240,14 @@ async def main() -> None:
         await scheduler.stop()
     for ch in channels:
         await ch.stop()
-    if mcp_client:
+    if bundle.mcp_client:
         try:
-            await mcp_client.close()
+            await bundle.mcp_client.close()
         except (OSError, RuntimeError):
             logger.debug("MCP client close failed (already closed or loop shutdown)")
-    if checkpointer:
+    if bundle.checkpointer:
         try:
-            await checkpointer.conn.close()
+            await bundle.checkpointer.conn.close()
         except Exception:
             logger.debug("Checkpointer close failed (already closed)")
 

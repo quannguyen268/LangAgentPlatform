@@ -7,7 +7,9 @@ gateway, model router) and middleware (retry, limits, summarization, context edi
 """
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
@@ -26,6 +28,23 @@ from .tools.model_router import switch_model, init_model_router_tools, RoutingCh
 from .transcription import init_transcription
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PlatformBundle:
+    """Aggregate return value of create_agent().
+
+    Replaces the historical N-tuple to keep call sites stable as new
+    subsystems get wired in (Swarm in 2B-I, future broadcaster channels, etc.).
+    """
+    agent: Any
+    checkpointer: Any
+    cost_tracker: Any
+    mcp_client: Any | None = None
+    subagent_registry: Any | None = None
+    recovery_executor: Any | None = None
+    broadcaster: Any | None = None
+    swarm: Any | None = None
 
 
 def _build_interrupt_on(config: AppConfig) -> dict | None:
@@ -132,18 +151,21 @@ def _build_middleware(config: AppConfig) -> list:
     return middleware
 
 
-async def create_agent(config: AppConfig):
+async def create_agent(config: AppConfig) -> "PlatformBundle":
     """Create and return the main LangAgent agent.
 
     Uses create_deep_agent() with middleware (AD-14).
 
     Returns:
-        tuple: (agent, checkpointer, mcp_client_or_None, subagent_registry_or_None,
-                cost_tracker, recovery_executor_or_None, broadcaster_or_None)
+        PlatformBundle: a frozen dataclass aggregating the agent and all
+        wired subsystems (checkpointer, cost_tracker, mcp_client,
+        subagent_registry, recovery_executor, broadcaster, swarm).
 
-        ``broadcaster`` is returned so ``main.py`` can attach the real
+        ``broadcaster`` is included so ``main.py`` can attach the real
         ``EventHub`` via ``broadcaster.set_hub(event_hub)`` once it's been
-        constructed. It is ``None`` when sub-agents are disabled.
+        constructed. It is ``None`` when sub-agents are disabled. The
+        ``swarm`` slot is populated by Phase 2B-I Task 2 when
+        ``config.swarm.enabled``; otherwise it is ``None``.
     """
     # Initialize tool configs
     init_web_tools(config.web)
@@ -338,4 +360,13 @@ async def create_agent(config: AppConfig):
         len(skills_dirs), len(middleware),
     )
 
-    return agent, checkpointer, mcp_client, subagent_registry, cost_tracker, recovery_executor, broadcaster
+    return PlatformBundle(
+        agent=agent,
+        checkpointer=checkpointer,
+        mcp_client=mcp_client,
+        subagent_registry=subagent_registry,
+        cost_tracker=cost_tracker,
+        recovery_executor=recovery_executor,
+        broadcaster=broadcaster,
+        swarm=None,  # Task 2 wires Swarm here when config.swarm.enabled
+    )
