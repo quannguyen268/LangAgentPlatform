@@ -9,7 +9,7 @@ gateway, model router) and middleware (retry, limits, summarization, context edi
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
@@ -27,6 +27,13 @@ from .tools.host import host_execute, init_host_tools
 from .tools.model_router import switch_model, init_model_router_tools, RoutingChatModel
 from .transcription import init_transcription
 
+if TYPE_CHECKING:
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+    from .subagent.broadcaster import EventBroadcaster
+    from .subagent.recovery_executor import RecoveryExecutor
+    from .subagent.registry import SubAgentRegistry
+    from .swarm.coordinator import Swarm
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,15 +43,19 @@ class PlatformBundle:
 
     Replaces the historical N-tuple to keep call sites stable as new
     subsystems get wired in (Swarm in 2B-I, future broadcaster channels, etc.).
+
+    ``frozen=True`` prevents field rebinding; the referenced subsystems
+    remain internally mutable by design (e.g., the registry tracks live
+    sub-agents whose state evolves over the run).
     """
-    agent: Any
-    checkpointer: Any
-    cost_tracker: Any
-    mcp_client: Any | None = None
-    subagent_registry: Any | None = None
-    recovery_executor: Any | None = None
-    broadcaster: Any | None = None
-    swarm: Any | None = None
+    agent: Any  # langgraph CompiledStateGraph — opaque return of create_deep_agent
+    checkpointer: AsyncSqliteSaver
+    cost_tracker: CostTracker
+    mcp_client: "MultiServerMCPClient | None" = None
+    subagent_registry: "SubAgentRegistry | None" = None
+    recovery_executor: "RecoveryExecutor | None" = None
+    broadcaster: "EventBroadcaster | None" = None
+    swarm: "Swarm | None" = None
 
 
 def _build_interrupt_on(config: AppConfig) -> dict | None:
