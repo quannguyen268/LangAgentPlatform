@@ -19,14 +19,33 @@ def _make_agent_info(agent_id="a1", **overrides):
 
 
 @pytest.fixture
-def app_with_registry():
+def make_app():
+    """Factory: build an aiohttp app with the management routes mounted.
+
+    Reusable across all 2B-I endpoint tests (agents/teams/tasks/config).
+    Each dependency is keyword-only and defaults to None so callers wire
+    only what they need.
+    """
+    from src.api.management import setup_management_routes
+
+    def _make(*, subagent_registry=None, swarm=None, config=None):
+        app = web.Application()
+        setup_management_routes(
+            app, subagent_registry=subagent_registry, swarm=swarm, config=config,
+        )
+        return app
+
+    return _make
+
+
+@pytest.fixture
+def app_with_registry(make_app):
     """aiohttp app with management routes wired to a populated registry.
 
     Uses MagicMock for asyncio.Task so the fixture stays sync (the read
     endpoints only inspect AgentInfo, not the task itself).
     """
     from unittest.mock import MagicMock
-    from src.api.management import setup_management_routes
 
     registry = SubAgentRegistry(InMemoryStore())
     info1 = _make_agent_info(agent_id="agent-aaa", state=SubAgentState.RUNNING)
@@ -36,19 +55,13 @@ def app_with_registry():
     )
     registry.register(info1, MagicMock())
     registry.register(info2, MagicMock())
-
-    app = web.Application()
-    setup_management_routes(app, subagent_registry=registry, swarm=None, config=None)
-    return app
+    return make_app(subagent_registry=registry)
 
 
 @pytest.fixture
-def app_no_registry():
+def app_no_registry(make_app):
     """aiohttp app with management routes but no registry (subsystem disabled)."""
-    from src.api.management import setup_management_routes
-    app = web.Application()
-    setup_management_routes(app, subagent_registry=None, swarm=None, config=None)
-    return app
+    return make_app()
 
 
 @pytest.mark.asyncio
@@ -63,12 +76,14 @@ async def test_get_agents_returns_list(app_with_registry, aiohttp_client):
     ids = {a["agent_id"] for a in data["agents"]}
     assert ids == {"agent-aaa", "agent-bbb"}
     sample = next(a for a in data["agents"] if a["agent_id"] == "agent-aaa")
-    # Spec §4.1 keys
+    # Spec §4.1 keys + finished_at (added so UIs can compute duration)
     for key in ("agent_id", "name", "role", "tier", "state", "task",
                 "tools", "skills", "iteration", "cost_cents",
-                "retry_count", "created_at", "last_heartbeat"):
+                "retry_count", "created_at", "last_heartbeat",
+                "finished_at"):
         assert key in sample
     assert sample["state"] == "running"
+    assert sample["finished_at"] is None  # RUNNING agent has not terminated
 
 
 @pytest.mark.asyncio

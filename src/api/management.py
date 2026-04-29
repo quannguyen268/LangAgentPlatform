@@ -16,14 +16,20 @@ logger = logging.getLogger(__name__)
 
 
 def _agent_to_dict(info) -> dict:
-    """Project AgentInfo to the /v1/agents response shape (spec §4.1)."""
-    state = info.state.value if hasattr(info.state, "value") else str(info.state)
+    """Project AgentInfo to the ``/v1/agents`` response shape (spec §4.1).
+
+    This is the **API-edge projection**: trimmed to fields a Web UI consumer
+    cares about, with timestamps in ISO-8601 UTC. ``AgentInfo.to_dict()``
+    is the **internal** serializer used for state snapshots; it returns raw
+    float timestamps and the full field set. The two intentionally diverge
+    because they serve different audiences — keep them that way.
+    """
     return {
         "agent_id": info.agent_id,
         "name": info.name,
         "role": info.role,
         "tier": info.tier,
-        "state": state,
+        "state": info.state.value,
         "task": info.task,
         "tools": list(info.tools),
         "skills": list(info.skills),
@@ -32,11 +38,15 @@ def _agent_to_dict(info) -> dict:
         "retry_count": info.retry_count,
         "created_at": _iso(info.created_at),
         "last_heartbeat": _iso(info.last_heartbeat),
+        # finished_at is set on FINISHED/FAILED agents and is materially
+        # useful to UI consumers ("how long did this run?"). Null for
+        # agents that haven't terminated yet.
+        "finished_at": _iso(info.finished_at),
     }
 
 
 def _iso(timestamp: float | None) -> str | None:
-    """Convert a unix timestamp (float) to ISO-8601 UTC string."""
+    """Convert a unix timestamp (float) to ISO-8601 UTC string. None → None."""
     if timestamp is None:
         return None
     from datetime import datetime, timezone

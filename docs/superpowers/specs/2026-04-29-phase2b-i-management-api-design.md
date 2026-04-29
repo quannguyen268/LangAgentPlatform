@@ -65,11 +65,13 @@ All responses are `application/json`, 200 on success, OpenAI-style error envelop
       "cost_cents": 12.4,
       "retry_count": 0,
       "created_at": "2026-04-23T14:02:11Z",
-      "last_heartbeat": "2026-04-23T14:05:42Z"
+      "last_heartbeat": "2026-04-23T14:05:42Z",
+      "finished_at": null
     }
   ]
 }
 ```
+``finished_at`` is null for agents that have not terminated; ISO-8601 UTC for FINISHED or FAILED agents. Useful so UIs can compute "how long did this run?"
 
 ### 4.2 `GET /v1/agents/{id}`
 Same shape as one element of the `agents` array above, plus an `error` field (most recent error string from `AgentInfo.error` if `retry_count > 0`, else null). 404 with OpenAI error envelope when unknown.

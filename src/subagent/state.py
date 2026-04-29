@@ -49,6 +49,13 @@ class AgentInfo:
     worktree_path: str | None = None    # For git worktree isolation
 
     def to_dict(self) -> dict:
+        """Internal serializer for state snapshots / debug logging.
+
+        Returns the full field set with raw float timestamps. The API-edge
+        projection used by ``/v1/agents`` lives in ``src/api/management.py``
+        as ``_agent_to_dict``; it intentionally trims fields and emits
+        ISO-8601 timestamps. Do not use this method for HTTP responses.
+        """
         return {
             "agent_id": self.agent_id,
             "name": self.name,
