@@ -56,6 +56,16 @@ def test_internal_error_no_exc_does_not_log():
     assert resp.status == 500
 
 
+def test_service_unavailable_returns_503():
+    from src.api.errors import service_unavailable
+    resp = service_unavailable("Resource not wired", code="dep_missing")
+    assert resp.status == 503
+    body = json.loads(resp.body.decode())
+    assert body["error"]["type"] == "internal_error"
+    assert body["error"]["code"] == "dep_missing"
+    assert body["error"]["message"] == "Resource not wired"
+
+
 def test_envelope_key_set_is_exactly_message_type_code():
     """Pin the envelope shape so a future addition of e.g. ``request_id``
     requires a deliberate test update rather than a silent contract drift."""

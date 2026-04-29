@@ -10,7 +10,7 @@ from typing import Optional
 
 from aiohttp import web
 
-from .errors import internal_error, not_found
+from .errors import internal_error, not_found, service_unavailable
 from .redaction import redact_model
 
 logger = logging.getLogger(__name__)
@@ -134,14 +134,14 @@ def setup_management_routes(
         if config is None:
             # Config is a wiring requirement, not an optional subsystem —
             # surface a 503 with a distinct code so operators can tell this
-            # apart from a generic 500.
-            return web.json_response(
-                {"error": {
-                    "message": "Config not wired into APIChannel",
-                    "type": "internal_error",
-                    "code": "config_unavailable",
-                }},
-                status=503,
+            # apart from a generic 500. Log loudly because this is a wiring
+            # bug in the host app, not a runtime condition.
+            logger.error(
+                "GET /v1/config: config not wired into setup_management_routes — "
+                "operators should pass config=AppConfig(...) when constructing the channel"
+            )
+            return service_unavailable(
+                "Config not wired into APIChannel", code="config_unavailable",
             )
         try:
             return web.json_response(redact_model(config))

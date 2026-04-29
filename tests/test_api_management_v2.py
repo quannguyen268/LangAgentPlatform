@@ -413,10 +413,74 @@ async def test_get_config_returns_redacted_dump(app_with_config, aiohttp_client)
 
 
 @pytest.mark.asyncio
+async def test_get_config_redacts_nested_mcp_servers_secrets(make_app, aiohttp_client):
+    """A secret key nested inside mcp_servers (dict[str, dict]) must be redacted at the API surface."""
+    from src.config import AppConfig
+
+    cfg = AppConfig()
+    cfg.mcp_servers = {
+        "fooserver": {
+            "command": "node",
+            "args": ["server.js"],
+            "env": {"FOO_TOKEN": "super-secret-token"},
+        }
+    }
+    app = make_app(config=cfg)
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/config")
+    assert resp.status == 200
+    data = await resp.json()
+    # Secret token redacted
+    assert data["mcp_servers"]["fooserver"]["env"]["FOO_TOKEN"] == "***REDACTED***"
+    assert "super-secret-token" not in str(data)
+    # Non-secret fields survive
+    assert data["mcp_servers"]["fooserver"]["command"] == "node"
+
+
+@pytest.mark.asyncio
+async def test_get_config_legitimate_fields_survive_redaction(app_with_config, aiohttp_client):
+    """Redaction must not over-mask: non-sensitive fields must round-trip their real values."""
+    client = await aiohttp_client(app_with_config)
+    resp = await client.get("/v1/config")
+    data = await resp.json()
+    # provider.name and provider.model are NOT secrets; they must survive verbatim.
+    assert data["provider"]["name"] == "anthropic"  # default
+    assert isinstance(data["provider"]["model"], str)
+    assert data["provider"]["model"] != "***REDACTED***"
+    # agent.workspace and subagent.enabled survive
+    assert data["agent"]["workspace"] == "./workspace"
+    assert isinstance(data["subagent"]["enabled"], bool)
+
+
+@pytest.mark.asyncio
 async def test_get_config_503_when_config_not_wired(app_no_registry, aiohttp_client):
-    """When setup_management_routes received config=None, the endpoint surfaces a 503."""
+    """When setup_management_routes received config=None, the endpoint surfaces a 503
+    with the distinct ``config_unavailable`` code so operators can discriminate from
+    generic 500s."""
     client = await aiohttp_client(app_no_registry)
     resp = await client.get("/v1/config")
     assert resp.status == 503
     body = await resp.json()
     assert body["error"]["type"] == "internal_error"
+    assert body["error"]["code"] == "config_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_get_config_500_envelope_when_redact_model_raises(monkeypatch, make_app, aiohttp_client):
+    """If redact_model raises (e.g., an un-serializable field crept in), the handler
+    must return a 500 internal_error envelope rather than crashing the request."""
+    from src.config import AppConfig
+    from src.api import management as mgmt
+
+    def _boom(model):
+        raise RuntimeError("redact boom")
+
+    monkeypatch.setattr(mgmt, "redact_model", _boom)
+
+    app = make_app(config=AppConfig())
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/config")
+    assert resp.status == 500
+    body = await resp.json()
+    assert body["error"]["type"] == "internal_error"
+    assert body["error"]["message"] == "Failed to render config"

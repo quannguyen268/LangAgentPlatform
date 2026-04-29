@@ -44,3 +44,12 @@ def internal_error(
     if exc is not None:
         logger.exception("Management API internal error: %s", exc)
     return _envelope(message, type_="internal_error", code=code, status=500)
+
+
+def service_unavailable(
+    message: str, *, code: str = "service_unavailable",
+) -> web.Response:
+    """503 response. Use for wiring/configuration faults that are not transient
+    failures (e.g., a required dependency was never injected at construction)
+    and won't recover without operator action."""
+    return _envelope(message, type_="internal_error", code=code, status=503)
