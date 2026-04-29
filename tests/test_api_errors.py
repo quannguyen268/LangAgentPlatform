@@ -54,3 +54,13 @@ def test_internal_error_no_exc_does_not_log():
     from src.api.errors import internal_error
     resp = internal_error("Server hiccup")
     assert resp.status == 500
+
+
+def test_envelope_key_set_is_exactly_message_type_code():
+    """Pin the envelope shape so a future addition of e.g. ``request_id``
+    requires a deliberate test update rather than a silent contract drift."""
+    from src.api.errors import not_found, bad_request, internal_error
+    for resp in (not_found("x"), bad_request("x"), internal_error("x")):
+        body = json.loads(resp.body.decode())
+        assert set(body.keys()) == {"error"}
+        assert set(body["error"].keys()) == {"message", "type", "code"}

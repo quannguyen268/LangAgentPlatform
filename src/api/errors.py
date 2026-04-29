@@ -1,10 +1,14 @@
 """OpenAI-style error envelope helpers for the management API.
 
-Every handler must return errors in the shape:
+Every management handler must return errors in the shape:
 
     {"error": {"message": str, "type": str, "code": str}}
 
-which matches the existing /v1/chat/completions error contract.
+This establishes the canonical OpenAI-style error contract for the management
+API surface introduced in Phase 2B-I. The legacy ``/v1/chat/completions``
+handler currently raises ``web.HTTPBadRequest(reason=...)`` (text/plain) and
+will be migrated to this envelope in a later phase; do not rely on it being
+already aligned.
 """
 from __future__ import annotations
 
