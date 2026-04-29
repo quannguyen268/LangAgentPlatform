@@ -9,9 +9,9 @@ Launch is transactional: if any ``spawner.spawn`` call raises mid-loop,
 the agents already registered for this team are cancelled and deregistered
 before the exception propagates. The caller never sees a half-launched team.
 
-``workspace`` and ``broadcaster`` are held on the instance for T13 wiring
-(they feed into HarnessContext and lifecycle events, respectively); they are
-deliberately unused today to keep T12 scope tight.
+``workspace`` and ``broadcaster`` are held on the instance for upcoming
+wiring (broadcaster → lifecycle events, workspace → HarnessContext) and
+are not yet read by Swarm itself.
 """
 from __future__ import annotations
 
@@ -122,6 +122,10 @@ class Swarm:
             await self._rollback(spawned_ids)
             raise
 
+        # Invariant: ``team_id`` is present in ``_teams`` iff present in
+        # ``_team_agents``. These two writes must stay paired with no awaits
+        # between them so the API view (`GET /v1/teams`) cannot observe a
+        # team without its agent ids.
         self._teams[team_id] = HarnessRunner(
             phases=template.phases, gates=gates,
         )

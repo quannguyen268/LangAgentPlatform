@@ -1,28 +1,12 @@
 """Test PlatformBundle replaces create_agent's tuple return."""
-import sys
-
 import pytest
 
-
-def _ensure_real_deepagents():
-    """Undo any sys.modules pollution from earlier test files.
-
-    test_backend.py installs a MagicMock for ``deepagents`` (and submodules)
-    via ``sys.modules.setdefault`` so it can run without the real package.
-    When that mock wins, importing ``src.agent`` fails on
-    ``import deepagents.middleware.skills`` because the mock is not a real
-    package. Drop the mocks here so the real package gets loaded.
-    """
-    for name in list(sys.modules):
-        if name == "deepagents" or name.startswith("deepagents."):
-            mod = sys.modules[name]
-            if mod.__class__.__module__ == "unittest.mock":
-                del sys.modules[name]
+from tests.conftest import ensure_real_deepagents
 
 
 def test_platform_bundle_is_frozen():
     """PlatformBundle must be a frozen dataclass — no field mutation after construction."""
-    _ensure_real_deepagents()
+    ensure_real_deepagents()
     from src.agent import PlatformBundle
     from dataclasses import fields, FrozenInstanceError
 
@@ -46,7 +30,7 @@ def test_platform_bundle_is_frozen():
 def test_platform_bundle_defaults_optional_fields_to_none():
     """All Optional[...] fields default to None so callers can construct minimally,
     and required fields round-trip the values they were given."""
-    _ensure_real_deepagents()
+    ensure_real_deepagents()
     from src.agent import PlatformBundle
     a, c, t = object(), object(), object()
     bundle = PlatformBundle(agent=a, checkpointer=c, cost_tracker=t)
@@ -64,7 +48,7 @@ def test_platform_bundle_defaults_optional_fields_to_none():
 
 def test_platform_bundle_required_fields_must_be_provided():
     """``agent``, ``checkpointer``, ``cost_tracker`` have no defaults — pin the contract."""
-    _ensure_real_deepagents()
+    ensure_real_deepagents()
     from src.agent import PlatformBundle
     with pytest.raises(TypeError):
         PlatformBundle(agent=object(), checkpointer=object())  # missing cost_tracker

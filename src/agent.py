@@ -281,6 +281,15 @@ async def create_agent(config: AppConfig) -> "PlatformBundle":
     recovery_executor = None
     broadcaster = None
     swarm = None
+    # Surface the silent-no-op combination: swarm needs the registry that the
+    # subagent system provides. If the operator opts into swarm but disables
+    # subagent, we'd otherwise leave bundle.swarm=None with no feedback.
+    if config.swarm.enabled and not config.subagent.enabled:
+        logger.warning(
+            "config.swarm.enabled=True but config.subagent.enabled=False — "
+            "Swarm will not be instantiated (it requires the SubAgentRegistry). "
+            "Enable both, or unset swarm.enabled to silence this warning."
+        )
     if config.subagent.enabled:
         from .subagent.registry import SubAgentRegistry
         from .subagent.tools import (

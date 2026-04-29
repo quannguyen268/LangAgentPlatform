@@ -1,10 +1,29 @@
 """Shared test fixtures."""
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+def ensure_real_deepagents() -> None:
+    """Undo any sys.modules pollution of ``deepagents.*`` from earlier tests.
+
+    ``tests/test_backend.py`` installs ``MagicMock`` instances under the
+    ``deepagents`` namespace so it can run without the real package. Those
+    mocks survive in ``sys.modules`` for the rest of the pytest process and
+    break any later test that imports ``src.agent`` (which transitively
+    imports ``deepagents.middleware.skills``). Call this helper at the top
+    of any test that needs the real package — it drops only ``unittest.mock``
+    entries, leaving genuine modules untouched.
+    """
+    for name in list(sys.modules):
+        if name == "deepagents" or name.startswith("deepagents."):
+            mod = sys.modules[name]
+            if mod.__class__.__module__ == "unittest.mock":
+                del sys.modules[name]
 
 from src.config import (
     AgentConfig,
