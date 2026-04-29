@@ -188,3 +188,69 @@ async def test_get_teams_empty_when_swarm_disabled(app_no_registry, aiohttp_clie
     resp = await client.get("/v1/teams")
     assert resp.status == 200
     assert await resp.json() == {"teams": []}
+
+
+@pytest.mark.asyncio
+async def test_get_teams_after_all_phases_finished(make_app, aiohttp_client):
+    """Pin the post-finish JSON shape: current_phase is null, is_finished is True."""
+    from src.swarm.phases import HarnessContext
+    registry, swarm, team_id = await _make_swarm_with_team()
+
+    runner = swarm.get_harness(team_id)
+    ctx = HarnessContext(workspace="/tmp", registry=registry, approvals=set())
+    # No gates configured → every try_advance succeeds.
+    while not runner.is_finished:
+        await runner.try_advance(ctx)
+
+    app = make_app(subagent_registry=registry, swarm=swarm)
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/teams")
+    assert resp.status == 200
+    team = (await resp.json())["teams"][0]
+    assert team["is_finished"] is True
+    assert team["current_phase"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_teams_lists_multiple_distinct_teams(make_app, aiohttp_client):
+    """Two launches must produce two entries with disjoint agent_ids."""
+    registry1, swarm, team_id1 = await _make_swarm_with_team()
+    # Launch a second team on the same swarm — distinct team_id, distinct agents.
+    from src.swarm.templates import TeamTemplate, AgentTemplate
+    tmpl = TeamTemplate(
+        name="t2", goal="g2", phases=["plan"],
+        agents=[
+            AgentTemplate(name="b1", role="planner", tier="standard",
+                          tools=[], skills=[], task_prompt="P2"),
+        ],
+    )
+    team_id2 = await swarm.launch(tmpl)
+
+    app = make_app(subagent_registry=registry1, swarm=swarm)
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/teams")
+    assert resp.status == 200
+    teams = (await resp.json())["teams"]
+    assert len(teams) == 2
+    by_id = {t["team_id"]: t for t in teams}
+    assert team_id1 in by_id and team_id2 in by_id
+    # Agent IDs disjoint
+    set1 = set(by_id[team_id1]["agent_ids"])
+    set2 = set(by_id[team_id2]["agent_ids"])
+    assert set1.isdisjoint(set2)
+
+
+@pytest.mark.asyncio
+async def test_get_teams_returns_internal_error_envelope_on_exception(make_app, aiohttp_client):
+    """Inject a swarm whose iter_teams() raises; assert 500 envelope shape."""
+    from unittest.mock import MagicMock
+    swarm = MagicMock()
+    swarm.iter_teams.side_effect = RuntimeError("boom")
+
+    app = make_app(swarm=swarm)
+    client = await aiohttp_client(app)
+    resp = await client.get("/v1/teams")
+    assert resp.status == 500
+    body = await resp.json()
+    assert body["error"]["type"] == "internal_error"
+    assert body["error"]["message"] == "Failed to list teams"

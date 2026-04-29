@@ -95,13 +95,15 @@ def setup_management_routes(
             if swarm is None:
                 return web.json_response({"teams": []})
             teams = []
-            for team_id, runner in swarm._teams.items():
+            for team_id, runner in swarm.iter_teams():
                 agent_ids = swarm.get_team_agents(team_id)
                 teams.append({
                     "team_id": team_id,
-                    "phases": list(runner._phases),
+                    "phases": list(runner.phases),
                     "current_phase": runner.current_phase,
                     "is_finished": runner.is_finished,
+                    # agent_count is redundant with len(agent_ids) but spares
+                    # UI consumers from iterating to render team-card badges.
                     "agent_count": len(agent_ids),
                     "agent_ids": list(agent_ids),
                 })

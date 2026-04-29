@@ -152,3 +152,12 @@ class Swarm:
     def get_team_agents(self, team_id: str) -> list[str]:
         """Return the agent_ids launched for a given team_id, or [] if unknown."""
         return list(self._team_agents.get(team_id, []))
+
+    def iter_teams(self):
+        """Iterate over ``(team_id, HarnessRunner)`` pairs.
+
+        Iteration order is dict-insertion (Python 3.7+) but should not be
+        relied on as part of the public contract — sort downstream if a
+        stable ordering is required.
+        """
+        return iter(self._teams.items())

@@ -40,6 +40,11 @@ class HarnessRunner:
         self._index = 0
 
     @property
+    def phases(self) -> tuple[str, ...]:
+        """Immutable view of the configured phase sequence."""
+        return tuple(self._phases)
+
+    @property
     def current_phase(self) -> str | None:
         if self.is_finished:
             return None
