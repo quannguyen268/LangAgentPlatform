@@ -6,7 +6,7 @@ to return from ``GET /v1/config``.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -51,18 +51,62 @@ def _walk(node: Any, *, path: tuple[str, ...], sensitive_paths: set[tuple[str, .
     return node
 
 
-def _collect_sensitive_paths(model_cls: type[BaseModel], prefix: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
-    """Walk a Pydantic model class and collect dotted paths flagged ``sensitive=True``."""
+def _basemodel_subclasses_in(annotation: Any) -> list[type[BaseModel]]:
+    """Return any ``BaseModel`` subclasses found by peeling container types.
+
+    Handles bare model refs (``Inner``), Optional/Union (``Inner | None``),
+    list/tuple/set (``list[Inner]``), and dict values (``dict[K, Inner]``).
+    Returns an empty list for anything else.
+    """
+    # Bare BaseModel subclass
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return [annotation]
+
+    origin = get_origin(annotation)
+    if origin is None:
+        return []
+
+    found: list[type[BaseModel]] = []
+    args = get_args(annotation)
+    # Union/Optional: inspect every arm
+    # list/tuple/set: inspect every element type
+    # dict: inspect the value type only (key types aren't expected to be models)
+    if origin is dict:
+        # dict[K, V] — peel V
+        for arg in args[1:]:
+            found.extend(_basemodel_subclasses_in(arg))
+    else:
+        for arg in args:
+            found.extend(_basemodel_subclasses_in(arg))
+    return found
+
+
+def _collect_sensitive_paths(
+    model_cls: type[BaseModel],
+    prefix: tuple[str, ...] = (),
+    _visited: set[type[BaseModel]] | None = None,
+) -> set[tuple[str, ...]]:
+    """Walk a Pydantic model class and collect dotted paths flagged ``sensitive=True``.
+
+    Recurses through nested ``BaseModel`` references including those wrapped in
+    ``Optional``, lists, and dict values. ``_visited`` guards against cyclic
+    self-references (e.g. ``Self`` types) to avoid infinite recursion.
+    """
+    if _visited is None:
+        _visited = set()
+    if model_cls in _visited:
+        return set()
+    _visited = _visited | {model_cls}
+
     paths: set[tuple[str, ...]] = set()
     for name, info in model_cls.model_fields.items():
         full_path = prefix + (name,)
         extra = info.json_schema_extra or {}
         if isinstance(extra, dict) and extra.get("sensitive"):
             paths.add(full_path)
-        # Recurse into nested BaseModel annotations
-        ann = info.annotation
-        if isinstance(ann, type) and issubclass(ann, BaseModel):
-            paths |= _collect_sensitive_paths(ann, prefix=full_path)
+        # Recurse into any BaseModel hidden inside Optional/list/dict/etc.
+        for nested in _basemodel_subclasses_in(info.annotation):
+            paths |= _collect_sensitive_paths(nested, prefix=full_path, _visited=_visited)
     return paths
 
 
