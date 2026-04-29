@@ -254,3 +254,60 @@ async def test_get_teams_returns_internal_error_envelope_on_exception(make_app, 
     body = await resp.json()
     assert body["error"]["type"] == "internal_error"
     assert body["error"]["message"] == "Failed to list teams"
+
+
+@pytest.fixture
+def app_with_tasks(tmp_path, monkeypatch, make_app):
+    """aiohttp app with cron module pointed at a tmp tasks file holding one task."""
+    from src.tools import cron
+    import json as json_mod
+
+    data_file = tmp_path / "tasks.json"
+    data_file.write_text(json_mod.dumps([
+        {
+            "id": "t-1",
+            "prompt": "Daily check",
+            "type": "cron",
+            "value": "0 9 * * *",
+            "channel": "telegram",
+            "chat_id": "100",
+            "created_at": "2026-04-20T11:23:00+00:00",
+            "last_run": None,
+            "active": True,
+            "model_tier": "standard",
+        }
+    ]))
+    monkeypatch.setattr(cron, "_data_file", str(data_file))
+    monkeypatch.setattr(cron, "_tasks_lock", asyncio.Lock())
+    return make_app()
+
+
+@pytest.mark.asyncio
+async def test_get_tasks_returns_active_tasks(app_with_tasks, aiohttp_client):
+    client = await aiohttp_client(app_with_tasks)
+    resp = await client.get("/v1/tasks")
+    assert resp.status == 200
+    data = await resp.json()
+    assert "tasks" in data
+    assert len(data["tasks"]) == 1
+    t = data["tasks"][0]
+    for key in ("task_id", "prompt", "schedule_type", "schedule_value",
+                "model_tier", "next_run", "created_at"):
+        assert key in t
+    assert t["task_id"] == "t-1"
+    assert t["schedule_type"] == "cron"
+
+
+@pytest.mark.asyncio
+async def test_get_tasks_empty_when_data_file_missing(tmp_path, monkeypatch, make_app, aiohttp_client):
+    """Spec §4.8: missing scheduler data → 200 with empty list."""
+    from src.tools import cron
+    monkeypatch.setattr(cron, "_data_file", str(tmp_path / "does-not-exist.json"))
+    monkeypatch.setattr(cron, "_tasks_lock", asyncio.Lock())
+
+    app = make_app()
+    client = await aiohttp_client(app)
+
+    resp = await client.get("/v1/tasks")
+    assert resp.status == 200
+    assert await resp.json() == {"tasks": []}

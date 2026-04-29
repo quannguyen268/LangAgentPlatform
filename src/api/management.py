@@ -111,6 +111,18 @@ def setup_management_routes(
         except Exception as e:
             return internal_error("Failed to list teams", exc=e)
 
+    async def handle_tasks_list(request: web.Request) -> web.Response:
+        try:
+            from ..tools.cron import list_active_tasks_structured
+            tasks = await list_active_tasks_structured()
+            return web.json_response({"tasks": tasks})
+        except RuntimeError:
+            # cron tools not initialized — treat as "scheduler disabled" (spec §4.8)
+            return web.json_response({"tasks": []})
+        except Exception as e:
+            return internal_error("Failed to list scheduled tasks", exc=e)
+
     app.router.add_get("/v1/agents", handle_agents_list)
     app.router.add_get("/v1/agents/{agent_id}", handle_agent_detail)
     app.router.add_get("/v1/teams", handle_teams_list)
+    app.router.add_get("/v1/tasks", handle_tasks_list)
