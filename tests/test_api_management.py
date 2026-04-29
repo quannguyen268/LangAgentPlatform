@@ -86,3 +86,17 @@ async def test_cost_breakdown(management_app, aiohttp_client):
     data = await resp.json()
     assert "by_user" in data
     assert "by_tier" in data
+
+
+@pytest.mark.asyncio
+async def test_cost_breakdown_contract(management_app, aiohttp_client):
+    """Spec §4.6 contract test: /v1/cost/breakdown returns {by_user, by_tier, by_agent}."""
+    client = await aiohttp_client(management_app)
+    resp = await client.get("/v1/cost/breakdown")
+    assert resp.status == 200
+    data = await resp.json()
+    # Pin the documented shape
+    assert set(data.keys()) == {"by_user", "by_tier", "by_agent"}
+    assert isinstance(data["by_user"], dict)
+    assert isinstance(data["by_tier"], dict)
+    assert isinstance(data["by_agent"], dict)

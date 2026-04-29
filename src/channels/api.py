@@ -69,6 +69,8 @@ class APIChannel(AbstractChannel):
 
     name = "api"
 
+    _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
     def __init__(
         self,
         host: str = "0.0.0.0",
@@ -76,12 +78,18 @@ class APIChannel(AbstractChannel):
         workspace=None,
         cost_tracker=None,
         event_hub=None,
+        subagent_registry=None,
+        swarm=None,
+        config=None,
     ) -> None:
         self._host = host
         self._port = port
         self._workspace = workspace
         self._cost_tracker = cost_tracker
         self._event_hub = event_hub
+        self._subagent_registry = subagent_registry
+        self._swarm = swarm
+        self._config = config
         self._callback = None
         self._runner: web.AppRunner | None = None
         # Maps request_id -> asyncio.Queue[str | None]
@@ -92,23 +100,47 @@ class APIChannel(AbstractChannel):
     # AbstractChannel interface
     # ------------------------------------------------------------------
 
-    async def start(self) -> None:
-        """Start the aiohttp web server."""
-        app = web.Application()
+    def _warn_if_non_loopback(self) -> None:
+        """Emit a WARN when bound to a non-loopback host (Phase 2B-I is localhost-only)."""
+        if self._host not in self._LOOPBACK_HOSTS:
+            logger.warning(
+                "APIChannel: bound to non-loopback host %r without authentication. "
+                "Management endpoints (/v1/agents, /v1/teams, /v1/tasks, /v1/config) "
+                "are exposed to the network. Bind to 127.0.0.1 or add auth.",
+                self._host,
+            )
+
+    def _register_routes(self, app: web.Application) -> None:
+        """Mount all routes on the given app. Extracted for unit testing."""
+        # Existing chat routes
         app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
         app.router.add_get("/v1/models", self._handle_models)
         app.router.add_get("/health", self._handle_health)
 
-        # Management API routes
+        # Phase 1B memory + cost routes
         if self._workspace:
-            from ..api.routes import setup_management_routes
-            setup_management_routes(app, workspace=self._workspace, cost_tracker=self._cost_tracker)
+            from ..api.routes import setup_management_routes as setup_legacy
+            setup_legacy(app, workspace=self._workspace, cost_tracker=self._cost_tracker)
 
         # WebSocket
         if self._event_hub:
             from ..api.websocket import setup_websocket
             setup_websocket(app, self._event_hub)
 
+        # Phase 2B-I read-only management routes
+        from ..api.management import setup_management_routes as setup_phase2b
+        setup_phase2b(
+            app,
+            subagent_registry=self._subagent_registry,
+            swarm=self._swarm,
+            config=self._config,
+        )
+
+    async def start(self) -> None:
+        """Start the aiohttp web server."""
+        self._warn_if_non_loopback()
+        app = web.Application()
+        self._register_routes(app)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)

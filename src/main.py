@@ -99,6 +99,9 @@ async def main() -> None:
             workspace=config.agent.workspace,
             cost_tracker=bundle.cost_tracker,
             event_hub=event_hub,
+            subagent_registry=bundle.subagent_registry,
+            swarm=bundle.swarm,
+            config=config,
         )
 
         async def api_callback(msg):
