@@ -22,9 +22,8 @@ The platform uses **DeepAgents' `create_deep_agent()`** with **LangChain middlew
 | [Phase 1C](2026-04-16-phase1c-subagent-system.md) | Sub-Agent System | **DONE** (v0.3.0-phase1c) | SubAgentMiddleware config, orchestration tools, BaseStore communication, health monitoring | Phase 1A |
 | [Phase 2A](2026-04-16-phase2a-swarm-harness.md) | Swarm & Harness | **DONE** (v0.4.0-phase2a) | Team templates, phase gates, git worktree, conflict detection, failure recovery | Phase 1C |
 | [Phase 2B-I](2026-04-29-phase2b-i-management-api.md) | Management API (read-only) | **DONE** (v0.5.0-phase2b-i) | /v1/agents, /v1/teams, /v1/tasks, /v1/config + Swarm wired into create_agent | Phase 2A |
-| Phase 2B-II | Web UI v1 | PENDING | Chat panel + Swarm dashboard + Settings (consumes 2B-I API) | Phase 2B-I |
-| Phase 2B-III | Discord & Slack channels | PENDING | New chat-channel adapters | Phase 2A |
-| Phase 3 | Polish & Scale | PENDING | Marketplace, LSP, natural language scheduling, Docker sandbox | Phase 2B-II + 2B-III |
+| Phase 2B-II | Web UI v1 | **NEXT** | Chat panel + Swarm dashboard + Settings (consumes 2B-I API) | Phase 2B-I |
+| Phase 3 | Polish & Scale | PENDING | Marketplace, LSP, natural language scheduling, Docker sandbox | Phase 2B-II |
 
 ## What Changed with AD-14 (Middleware Refactor)
 
