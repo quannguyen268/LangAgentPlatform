@@ -84,6 +84,7 @@ class APIChannel(AbstractChannel):
         subagent_registry=None,
         swarm=None,
         config=None,
+        web_dist_path: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -93,6 +94,7 @@ class APIChannel(AbstractChannel):
         self._subagent_registry = subagent_registry
         self._swarm = swarm
         self._config = config
+        self._web_dist_path = web_dist_path
         self._callback = None
         self._runner: web.AppRunner | None = None
         # Maps request_id -> asyncio.Queue[str | None]
@@ -141,6 +143,29 @@ class APIChannel(AbstractChannel):
             config=self._config,
         )
 
+        # Phase 2B-II Web UI: static file serving + root redirect.
+        # Only wire up when the dist directory exists and was passed by main.py.
+        if self._web_dist_path:
+            from pathlib import Path
+            dist = Path(self._web_dist_path)
+            if dist.is_dir():
+                logger.info("APIChannel: serving web UI from %s", dist)
+                app.router.add_get("/", self._handle_root_redirect)
+                # Explicit /web/ handler returns index.html (aiohttp's add_static
+                # does not auto-resolve directory URLs to index files).
+                app.router.add_get("/web/", self._handle_web_index)
+                # Static assets at /web/* — show_index=False prevents the dist
+                # directory contents being listed if someone hits /web/assets/.
+                app.router.add_static(
+                    "/web/", path=str(dist),
+                    show_index=False, append_version=False,
+                )
+            else:
+                logger.warning(
+                    "APIChannel: web_dist_path %s does not exist; skipping web UI routes",
+                    dist,
+                )
+
     async def start(self) -> None:
         """Start the aiohttp web server."""
         self._warn_if_non_loopback()
@@ -183,6 +208,22 @@ class APIChannel(AbstractChannel):
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def _handle_root_redirect(self, request: web.Request) -> web.Response:
+        """Redirect / to /web/ so operators landing on the bare host see the dashboard."""
+        raise web.HTTPFound("/web/")
+
+    async def _handle_web_index(self, request: web.Request) -> web.FileResponse:
+        """Serve index.html for the bare /web/ URL.
+
+        aiohttp's ``add_static`` does NOT auto-serve index.html for directory
+        URLs (the ``show_index`` flag controls listing, not index resolution).
+        We need an explicit handler that returns ``index.html`` from the dist
+        root so the SPA boots when the user visits /web/.
+        """
+        from pathlib import Path
+        assert self._web_dist_path  # guarded by the caller
+        return web.FileResponse(Path(self._web_dist_path) / "index.html")
 
     async def _handle_models(self, request: web.Request) -> web.Response:
         return web.json_response(
