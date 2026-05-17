@@ -151,8 +151,10 @@ class APIChannel(AbstractChannel):
             if dist.is_dir():
                 logger.info("APIChannel: serving web UI from %s", dist)
                 app.router.add_get("/", self._handle_root_redirect)
-                # Explicit /web/ handler returns index.html (aiohttp's add_static
-                # does not auto-resolve directory URLs to index files).
+                # NOTE: registration order matters — this add_get MUST precede
+                # add_static below, since aiohttp dispatches routes in insertion
+                # order. add_static does not auto-resolve directory URLs to
+                # index files, so the bare /web/ would 404 otherwise.
                 app.router.add_get("/web/", self._handle_web_index)
                 # Static assets at /web/* — show_index=False prevents the dist
                 # directory contents being listed if someone hits /web/assets/.
