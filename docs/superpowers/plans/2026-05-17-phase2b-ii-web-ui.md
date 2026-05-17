@@ -155,6 +155,7 @@ describe("App", () => {
     "@testing-library/user-event": "^14.5.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
+    "@types/node": "^20.12.0",
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.0",
     "jsdom": "^24.0.0",
@@ -214,7 +215,8 @@ dist
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
-    "strict": true
+    "strict": true,
+    "types": ["node"]
   },
   "include": ["vite.config.ts", "vitest.config.ts"]
 }
@@ -421,6 +423,14 @@ grep -q "Local:" /tmp/vite.log && echo "vite dev OK"
 ```
 
 Expected: `vite dev OK`.
+
+- [ ] **Step 4b: Verify production build**
+
+```bash
+cd web && npm run build && test -f ../src/api/static/index.html && echo "build OK"
+```
+
+Expected: `build OK`.
 
 - [ ] **Step 5: Commit**
 
