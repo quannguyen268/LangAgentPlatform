@@ -153,9 +153,9 @@ describe("App", () => {
     "@testing-library/jest-dom": "^6.4.0",
     "@testing-library/react": "^16.0.0",
     "@testing-library/user-event": "^14.5.0",
+    "@types/node": "^20.12.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
-    "@types/node": "^20.12.0",
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.0",
     "jsdom": "^24.0.0",
@@ -175,6 +175,13 @@ node_modules
 dist
 *.log
 .DS_Store
+
+# tsc -b outputs (we run with allowImportingTsExtensions; no need to track)
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js
+vitest.config.d.ts
+vitest.config.js
 ```
 
 `web/tsconfig.json`:
