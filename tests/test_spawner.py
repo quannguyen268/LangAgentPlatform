@@ -11,6 +11,35 @@ from src.subagent.registry import SubAgentRegistry
 from src.subagent.spawner import DeepAgentsSpawner
 from src.subagent.state import AgentInfo, SubAgentState
 
+from contextlib import suppress  # noqa: F401  (kept for symmetry with async helpers)
+
+
+def _astream_factory(chunks, captured=None):
+    """Return a fake ``astream(state, **kwargs)`` yielding the given chunks.
+
+    If ``captured`` is provided, the first message's content is recorded under
+    ``captured["content"]`` (used to assert recovery-context prepending).
+    """
+    def _astream(state, **kwargs):
+        if captured is not None:
+            captured["content"] = state["messages"][0].content
+
+        async def _gen():
+            for c in chunks:
+                yield c
+        return _gen()
+    return _astream
+
+
+def _astream_raises(exc):
+    """Return a fake ``astream`` whose generator raises ``exc`` when iterated."""
+    def _astream(state, **kwargs):
+        async def _gen():
+            raise exc
+            yield  # unreachable; makes this an async generator
+        return _gen()
+    return _astream
+
 
 @pytest.mark.asyncio
 async def test_spawner_writes_heartbeat_and_result(monkeypatch):
@@ -237,3 +266,178 @@ async def test_spawner_failed_event_uses_exception_type(monkeypatch):
     assert len(failed_events) == 1
     assert failed_events[0].data["reason"] == "ValueError"
     assert failed_events[0].data["action"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_streaming_increments_iteration_per_chunk(monkeypatch):
+    """Streaming path increments AgentInfo.iteration once per stream chunk."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+
+    inner = MagicMock()
+    inner.astream = _astream_factory([
+        {"messages": [AIMessage(content="step1")]},
+        {"messages": [AIMessage(content="step2")]},
+        {"messages": [AIMessage(content="step3")]},
+    ])
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+    )
+    info = AgentInfo(agent_id="a1", name="n1", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert registry.get_agent("a1").iteration == 3
+    hb = await registry.agent_store.read_heartbeat("a1")
+    assert hb["iteration"] == 3
+    result = await registry.agent_store.read_result("a1")
+    assert result["status"] == "success"
+    assert result["output"] == "step3"
+    assert registry.get_agent("a1").state == SubAgentState.FINISHED
+
+
+@pytest.mark.asyncio
+async def test_streaming_emits_progress_per_chunk(monkeypatch):
+    """Streaming path emits one agent_progress event per chunk."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    hub = EventHub()
+    broadcaster = EventBroadcaster(hub)
+
+    events = []
+
+    async def sub():
+        async for ev in hub.subscribe():
+            events.append(ev)
+            if ev.type == "agent_complete":
+                break
+
+    sub_task = asyncio.create_task(sub())
+    await asyncio.sleep(0.05)
+
+    inner = MagicMock()
+    inner.astream = _astream_factory([
+        {"messages": [AIMessage(content="alpha")]},
+        {"messages": [AIMessage(content="beta")]},
+    ])
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+    )
+    info = AgentInfo(agent_id="a1", name="n1", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(sub_task, timeout=2.0)
+
+    progress = [e for e in events if e.type == "agent_progress"]
+    assert len(progress) == 2
+    assert progress[0].data["message"] == "alpha"
+    assert progress[1].data["message"] == "beta"
+
+
+@pytest.mark.asyncio
+async def test_streaming_honors_shutdown_directive(monkeypatch):
+    """A pending shutdown directive ends the loop after the current chunk."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+
+    inner = MagicMock()
+    inner.astream = _astream_factory([
+        {"messages": [AIMessage(content="step1")]},
+        {"messages": [AIMessage(content="step2")]},
+        {"messages": [AIMessage(content="step3")]},
+        {"messages": [AIMessage(content="step4")]},
+        {"messages": [AIMessage(content="step5")]},
+    ])
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+    )
+    info = AgentInfo(agent_id="a1", name="n1", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+
+    # Pre-write the shutdown directive so the first chunk's post-check sees it.
+    await registry.agent_store.write_directive("a1", action="shutdown")
+
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert registry.get_agent("a1").iteration == 1  # broke after chunk 1
+    result = await registry.agent_store.read_result("a1")
+    assert result["status"] == "stopped"
+    assert result["output"] == "step1"
+    assert registry.get_agent("a1").state == SubAgentState.FINISHED
+    # Directive was consumed
+    assert await registry.agent_store.read_directive("a1") is None
+
+
+@pytest.mark.asyncio
+async def test_streaming_inner_failure_marks_failed(monkeypatch):
+    """An exception raised mid-stream marks the agent FAILED."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+
+    inner = MagicMock()
+    inner.astream = _astream_raises(RuntimeError("boom"))
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+    )
+    info = AgentInfo(agent_id="a1", name="n1", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert registry.get_agent("a1").state == SubAgentState.FAILED
+    assert "boom" in (registry.get_agent("a1").error or "")
+
+
+@pytest.mark.asyncio
+async def test_streaming_prepends_recovery_context(monkeypatch):
+    """Recovery context is prepended to the task in the streaming path too."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+    captured = {}
+
+    inner = MagicMock()
+    inner.astream = _astream_factory(
+        [{"messages": [AIMessage(content="ok")]}], captured=captured,
+    )
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+    )
+    info = AgentInfo(agent_id="a1", name="n1", role="executor", task="the original task",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info, recovery_context="Resuming after failure X")
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert "Resuming after failure X" in captured["content"]
+    assert "Task: the original task" in captured["content"]

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import aclosing
 from typing import Any, Optional
 
 from deepagents import create_deep_agent
@@ -144,5 +145,41 @@ class DeepAgentsSpawner:
         ``stopped`` is True only when a shutdown directive ended a streaming run
         early. Single-shot runs always return stopped=False.
         """
+        if self._streaming:
+            return await self._stream_run(inner, state, info)
         result = await inner.ainvoke(state)
         return _extract_last_text(result.get("messages", [])), False
+
+    async def _stream_run(self, inner: Any, state: dict, info: AgentInfo) -> tuple[str, bool]:
+        """Drive the inner agent turn-by-turn via astream.
+
+        Per chunk: increment iteration, write heartbeat + progress, emit
+        agent_progress, and break early if a shutdown directive is pending.
+        Uses stream_mode="values" so each chunk is the full state snapshot; the
+        last snapshot carries the final messages.
+        """
+        agent_id = info.agent_id
+        store = self._registry.agent_store
+        final_state = state
+        stopped = False
+
+        async with aclosing(inner.astream(state, stream_mode="values")) as stream:
+            async for chunk in stream:
+                final_state = chunk
+                self._registry.increment_iteration(agent_id)
+                preview = _extract_last_text(chunk.get("messages", []))[:_PROGRESS_PREVIEW_CHARS]
+
+                await store.write_heartbeat(agent_id, iteration=info.iteration, status="running")
+                await store.write_progress(agent_id, message=preview, cost=info.cost_cents)
+                self._broadcaster.agent_progress(
+                    agent_id=agent_id, message=preview, cost_cents=info.cost_cents,
+                )
+
+                directive = await store.read_directive(agent_id)
+                if directive and directive.get("action") == "shutdown":
+                    await store.clear_directive(agent_id)
+                    stopped = True
+                    logger.info("Sub-agent %s received shutdown directive; stopping", agent_id)
+                    break
+
+        return _extract_last_text(final_state.get("messages", [])), stopped
