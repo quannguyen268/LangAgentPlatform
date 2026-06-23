@@ -101,7 +101,7 @@ class DeepAgentsSpawner:
             await store.write_heartbeat(agent_id, iteration=1, status="running")
             self._registry.update_state(agent_id, SubAgentState.RUNNING)
 
-            # --- execute (branches in Task 2; single-shot for now) ---
+            # --- execute (streaming default; streaming=False for single-shot fallback) ---
             output, stopped = await self._execute(inner, state, info)
 
             # --- epilogue (shared) ---
