@@ -195,6 +195,17 @@ Each gets a one-line "future work" pointer in code where relevant:
 - True checkpoint-resume recovery (today recovery respawns fresh with a text
   `recovery_context`, not a real checkpoint resume).
 
+### 8.1 WS1 follow-ups (found in final review)
+
+Now that streaming makes `iteration` load-bearing, two adjacent issues are worth tracking:
+- **Iteration not reset on respawn** — `RecoveryExecutor` reuses the same `AgentInfo`, so a
+  recovered agent resumes its old `iteration` count and can re-trip `max_iterations` on the
+  next health tick. Fix when wiring recovery alongside WS2/streaming (reset `iteration` on respawn).
+- **`recall_agent` shutdown is racy** — `src/subagent/tools.py` writes the `shutdown` directive
+  then immediately `deregister`s (cancels), so the cooperative graceful-stop path WS1 added
+  rarely wins. Wire `recall_agent` to await the cooperative stop before cancelling (WS2 or a
+  follow-up).
+
 ---
 
 ## 9. Success criteria
