@@ -296,6 +296,7 @@ async def create_agent(config: AppConfig) -> "PlatformBundle":
             init_orchestration_tools,
             spawn_agent, recall_agent, monitor_agents,
             assign_task, switch_agent_model, review_cost,
+            subscribe_tool, unsubscribe_tool, subscribe_skill,
         )
         subagent_store = InMemoryStore()
         subagent_registry = SubAgentRegistry(subagent_store)
@@ -316,6 +317,8 @@ async def create_agent(config: AppConfig) -> "PlatformBundle":
             base_model=model,
             tools_by_name=tools_by_name,
             streaming=config.subagent.streaming,
+            workspace=workspace,
+            skills_dirs=skills_dirs if skills_dirs else None,
         )
         recovery_executor = RecoveryExecutor(
             registry=subagent_registry,
@@ -339,12 +342,14 @@ async def create_agent(config: AppConfig) -> "PlatformBundle":
             registry=subagent_registry,
             spawner=spawner.spawn,
             cost_tracker=cost_tracker,
+            known_tools=set(tools_by_name.keys()),
         )
         custom_tools.extend([
             spawn_agent, recall_agent, monitor_agents,
             assign_task, switch_agent_model, review_cost,
+            subscribe_tool, unsubscribe_tool, subscribe_skill,
         ])
-        logger.info("Orchestration tools enabled (6 tools)")
+        logger.info("Orchestration tools enabled (9 tools)")
 
     # MCP tools
     mcp_client = None
