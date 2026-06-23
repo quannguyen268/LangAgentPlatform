@@ -145,3 +145,51 @@ def test_ws2_known_tools_passed_to_init_orchestration_tools():
         "init_orchestration_tools() call must include "
         "known_tools=set(tools_by_name.keys()) so subscribe_tool can validate names."
     )
+
+
+@pytest.mark.asyncio
+async def test_ws2_known_tools_excludes_orchestration_tools(monkeypatch, tmp_path):
+    """Behavioral: known_tools passed to init_orchestration_tools are worker tools only.
+
+    Locks the snapshot-ordering invariant (a sub-agent must not be able to
+    subscribe orchestration tools). Mocks the model + graph so no credentials
+    are needed.
+    """
+    ensure_real_deepagents()
+    from unittest.mock import MagicMock
+    import src.agent as agent_mod
+    import src.subagent.tools as orch_tools
+    from src.config import AppConfig
+
+    # Avoid real model/graph construction.
+    monkeypatch.setattr(agent_mod, "init_chat_model", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(agent_mod, "create_deep_agent", lambda **k: MagicMock())
+    # _build_middleware() constructs a real SummarizationMiddleware(model="gpt-4o-mini")
+    # whose own init_chat_model demands OpenAI credentials. Middleware is orthogonal
+    # to the known_tools snapshot-ordering invariant under test, so stub it out.
+    monkeypatch.setattr(agent_mod, "_build_middleware", lambda config: [])
+
+    captured = {}
+    def _capture_init(**kwargs):
+        captured["known_tools"] = set(kwargs.get("known_tools") or set())
+    monkeypatch.setattr(orch_tools, "init_orchestration_tools", _capture_init)
+
+    cfg = AppConfig()
+    cfg.agent.workspace = str(tmp_path / "ws")
+    cfg.agent.data_dir = str(tmp_path / "data")
+    cfg.subagent.enabled = True
+    cfg.swarm.enabled = False
+    cfg.model_router.enabled = False
+
+    await agent_mod.create_agent(cfg)
+
+    orchestration_names = {
+        "spawn_agent", "recall_agent", "monitor_agents",
+        "assign_task", "switch_agent_model", "review_cost",
+        "subscribe_tool", "unsubscribe_tool", "subscribe_skill",
+    }
+    assert captured["known_tools"], "known_tools must not be empty (worker tools expected)"
+    assert not (captured["known_tools"] & orchestration_names), (
+        "known_tools must exclude orchestration tools — snapshot must precede "
+        "custom_tools.extend()"
+    )

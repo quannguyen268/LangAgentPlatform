@@ -310,6 +310,11 @@ async def create_agent(config: AppConfig) -> "PlatformBundle":
         # event_hub doesn't exist yet at this point; main.py attaches it via
         # broadcaster.set_hub(event_hub) once the API channel is built.
         broadcaster = EventBroadcaster(None)
+        # Snapshot BEFORE the orchestration tools are appended below.
+        # known_tools passed to init_orchestration_tools must contain only
+        # worker tools — orchestration tools (spawn_agent, subscribe_tool, …)
+        # must never be subscribable by a sub-agent. Do NOT move this past
+        # the custom_tools.extend() call below.
         tools_by_name = {t.name: t for t in custom_tools}
         spawner = DeepAgentsSpawner(
             registry=subagent_registry,
