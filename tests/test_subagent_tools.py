@@ -1,6 +1,7 @@
 """Test orchestration tools: spawn_agent, recall_agent, monitor_agents, etc."""
 import asyncio
 import pytest
+import pytest_asyncio
 from unittest.mock import MagicMock, AsyncMock
 from langgraph.store.memory import InMemoryStore
 
@@ -13,9 +14,15 @@ def test_tools_imports():
         monitor_agents,
         assign_task,
         switch_agent_model,
+        subscribe_tool,
+        unsubscribe_tool,
+        subscribe_skill,
         review_cost,
     )
     assert spawn_agent is not None
+    assert subscribe_tool is not None
+    assert unsubscribe_tool is not None
+    assert subscribe_skill is not None
 
 
 @pytest.mark.asyncio
@@ -254,8 +261,8 @@ async def test_spawn_agent_without_spawner_uses_placeholder():
     await registry.deregister(agents[0].agent_id)
 
 
-@pytest.fixture
-def registry_with_agent():
+@pytest_asyncio.fixture
+async def registry_with_agent():
     import asyncio
     from langgraph.store.memory import InMemoryStore
     from src.subagent.registry import SubAgentRegistry
@@ -263,7 +270,7 @@ def registry_with_agent():
     registry = SubAgentRegistry(InMemoryStore())
     info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
                      tier="standard", tools=["read_file"], skills=[])
-    registry.register(info, asyncio.get_event_loop().create_task(asyncio.sleep(0)))
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
     return registry, info
 
 
@@ -311,6 +318,37 @@ async def test_subscribe_skill_records_and_nudges(registry_with_agent):
     inbox = await registry.agent_store.drain_inbox("a1")
     assert any("github" in m["message"] for m in inbox)
     assert "github" in out
+
+
+@pytest.mark.asyncio
+async def test_subscribe_tool_idempotent_no_op_on_resubscribe(registry_with_agent):
+    """Re-subscribing an already-present tool reports a no-op, not success."""
+    from src.subagent.tools import init_orchestration_tools, subscribe_tool
+    registry, info = registry_with_agent           # info.tools == ["read_file"]
+    init_orchestration_tools(registry, known_tools={"read_file"})
+
+    out = await subscribe_tool.ainvoke({"agent_id": "a1", "tool_name": "read_file"})
+    # Still present exactly once, and the message signals it was already there.
+    assert info.tools.count("read_file") == 1
+    assert "already has tool" in out
+
+
+@pytest.mark.asyncio
+async def test_subscribe_skill_idempotent_no_second_nudge(registry_with_agent):
+    """A second subscribe_skill must not add a second inbox nudge."""
+    from src.subagent.tools import init_orchestration_tools, subscribe_skill
+    registry, info = registry_with_agent
+    init_orchestration_tools(registry, known_tools=set())
+
+    await subscribe_skill.ainvoke({"agent_id": "a1", "skill_name": "github"})
+    out = await subscribe_skill.ainvoke({"agent_id": "a1", "skill_name": "github"})
+
+    # Skill recorded exactly once and the duplicate call signals no-op.
+    assert info.skills.count("github") == 1
+    assert "already has skill" in out
+    # Only the first call nudged the inbox.
+    inbox = await registry.agent_store.drain_inbox("a1")
+    assert len(inbox) == 1
 
 
 @pytest.mark.asyncio

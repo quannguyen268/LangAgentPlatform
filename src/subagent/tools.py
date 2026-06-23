@@ -258,7 +258,8 @@ async def subscribe_tool(agent_id: str, tool_name: str) -> str:
         return f"Unknown tool '{tool_name}'. Available: {sorted(_known_tools)}"
     if tool_name not in info.tools:
         info.tools.append(tool_name)
-    return f"Tool '{tool_name}' subscribed to {agent_id} (effective next segment)."
+        return f"Tool '{tool_name}' subscribed to {agent_id} (effective next segment)."
+    return f"Agent {agent_id} already has tool '{tool_name}'."
 
 
 @tool
@@ -295,11 +296,12 @@ async def subscribe_skill(agent_id: str, skill_name: str) -> str:
         return f"Agent {agent_id} not found"
     if skill_name not in info.skills:
         info.skills.append(skill_name)
-    await _registry.agent_store.send_inbox(
-        agent_id, sender="master",
-        message=f"You now have access to the '{skill_name}' skill — use it when relevant.",
-    )
-    return f"Skill '{skill_name}' subscribed to {agent_id}."
+        await _registry.agent_store.send_inbox(
+            agent_id, sender="master",
+            message=f"You now have access to the '{skill_name}' skill — use it when relevant.",
+        )
+        return f"Skill '{skill_name}' subscribed to {agent_id}."
+    return f"Agent {agent_id} already has skill '{skill_name}'."
 
 
 @tool
