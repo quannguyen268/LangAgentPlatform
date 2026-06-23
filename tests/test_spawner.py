@@ -59,6 +59,7 @@ async def test_spawner_writes_heartbeat_and_result(monkeypatch):
         broadcaster=broadcaster,
         base_model=MagicMock(),
         tools_by_name={},
+        streaming=False,
     )
 
     info = AgentInfo(
@@ -110,6 +111,7 @@ async def test_spawner_emits_spawn_and_complete(monkeypatch):
         broadcaster=broadcaster,
         base_model=MagicMock(),
         tools_by_name={},
+        streaming=False,
     )
     info = AgentInfo(
         agent_id="a1", name="n1", role="executor", task="t",
@@ -140,6 +142,7 @@ async def test_spawner_handles_inner_failure(monkeypatch):
     spawner = DeepAgentsSpawner(
         registry=registry, broadcaster=broadcaster,
         base_model=MagicMock(), tools_by_name={},
+        streaming=False,
     )
     info = AgentInfo(
         agent_id="a1", name="n1", role="executor", task="t",
@@ -172,6 +175,7 @@ async def test_spawner_raises_on_unknown_tool(monkeypatch):
     spawner = DeepAgentsSpawner(
         registry=registry, broadcaster=broadcaster,
         base_model=MagicMock(), tools_by_name={"read_file": object()},
+        streaming=False,
     )
     info = AgentInfo(
         agent_id="a1", name="n1", role="executor", task="t",
@@ -209,6 +213,7 @@ async def test_spawner_prepends_recovery_context(monkeypatch):
     spawner = DeepAgentsSpawner(
         registry=registry, broadcaster=broadcaster,
         base_model=MagicMock(), tools_by_name={},
+        streaming=False,
     )
     info = AgentInfo(
         agent_id="a1", name="n1", role="executor", task="the original task",
@@ -250,6 +255,7 @@ async def test_spawner_failed_event_uses_exception_type(monkeypatch):
     spawner = DeepAgentsSpawner(
         registry=registry, broadcaster=broadcaster,
         base_model=MagicMock(), tools_by_name={},
+        streaming=False,
     )
     info = AgentInfo(
         agent_id="a1", name="n1", role="executor", task="t",

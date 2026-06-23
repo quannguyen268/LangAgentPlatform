@@ -8,11 +8,11 @@ For each ``AgentInfo`` passed to ``spawn()``, the spawner:
      ``agent_failed`` to the broadcaster.
   5. Updates SubAgentRegistry state transitions (SPAWNING → RUNNING → FINISHED / FAILED).
 
-Phase 2A limitation: ``iteration`` is written as 0 ("starting") then 1 ("running")
-and never incremented during ``inner.ainvoke()`` because the Phase 2A spawner runs
-the sub-agent as a single-shot call rather than a per-step stream. HealthMonitor
-still detects hangs via heartbeat timestamp staleness. Phase 2B may switch to
-``inner.astream()`` and emit ``agent_progress`` events per step.
+Execution model: by default the spawner drives the sub-agent via ``inner.astream()``
+(streaming), incrementing ``iteration`` and emitting ``agent_progress`` per step, and
+honoring a ``shutdown`` directive between steps. Passing ``streaming=False`` (config:
+``subagent.streaming``) falls back to a single ``inner.ainvoke()`` call. HealthMonitor
+detects hangs via heartbeat timestamp staleness in both modes.
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ class DeepAgentsSpawner:
         broadcaster: EventBroadcaster,
         base_model: Any,
         tools_by_name: dict[str, Any],
-        streaming: bool = False,
+        streaming: bool = True,
     ):
         self._registry = registry
         self._broadcaster = broadcaster

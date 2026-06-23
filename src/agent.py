@@ -315,6 +315,7 @@ async def create_agent(config: AppConfig) -> "PlatformBundle":
             broadcaster=broadcaster,
             base_model=model,
             tools_by_name=tools_by_name,
+            streaming=config.subagent.streaming,
         )
         recovery_executor = RecoveryExecutor(
             registry=subagent_registry,
