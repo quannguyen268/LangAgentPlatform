@@ -34,6 +34,7 @@ from .state import AgentInfo, SubAgentState
 logger = logging.getLogger(__name__)
 
 _PROGRESS_PREVIEW_CHARS = 200
+_MAX_SEGMENTS = 50  # safety cap on inbox-driven re-runs of a single sub-agent
 
 
 def _extract_last_text(messages: list) -> str:
@@ -200,15 +201,24 @@ class DeepAgentsSpawner:
         agent_id = info.agent_id
         store = self._registry.agent_store
         first_segment = True
+        segment_count = 0
 
         while True:
+            segment_count += 1
+            if segment_count > _MAX_SEGMENTS:
+                logger.warning(
+                    "Sub-agent %s exceeded %d segments; terminating", agent_id, _MAX_SEGMENTS
+                )
+                return _extract_last_text(messages), True   # mark as stopped, not a clean finish
             inner = self._build_inner(info)
             messages, stopped, saw_step = await self._run_segment(inner, messages, info)
 
             if stopped:                       # shutdown directive mid-segment
                 return _extract_last_text(messages), True
-            if first_segment and not saw_step:
-                raise RuntimeError(f"Sub-agent {agent_id}: astream produced no steps")
+            if not saw_step:
+                if first_segment:
+                    raise RuntimeError(f"Sub-agent {agent_id}: astream produced no steps")
+                logger.warning("Sub-agent %s: a follow-up segment produced no steps", agent_id)
             first_segment = False
 
             # Clean boundary: drain inbox for follow-up work.

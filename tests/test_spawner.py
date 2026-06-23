@@ -40,18 +40,25 @@ def _astream_raises(exc):
     return _astream
 
 
-def _astream_segments(segments):
-    """Fake astream where each call returns the next segment's chunks.
+def _astream_segments(segments, captured_states=None):
+    """Fake astream: call N yields segment N (preceded by the input-state echo).
 
-    ``segments`` is a list of chunk-lists; call N yields segment N (preceded by
-    the input-state echo, mirroring stream_mode="values").
+    Raises IndexError if called more times than there are segments, so an
+    unexpected extra segment fails loudly instead of silently yielding nothing.
     """
     calls = {"n": 0}
 
     def _astream(state, **kwargs):
         idx = calls["n"]
         calls["n"] += 1
-        chunks = segments[idx] if idx < len(segments) else []
+        if idx >= len(segments):
+            raise IndexError(
+                f"_astream_segments: called {idx + 1} times but only "
+                f"{len(segments)} segment(s) configured"
+            )
+        if captured_states is not None:
+            captured_states.append(state["messages"])
+        chunks = segments[idx]
         async def _gen():
             yield state
             for c in chunks:
@@ -640,10 +647,11 @@ async def test_assign_task_runs_another_segment(monkeypatch):
     broadcaster = EventBroadcaster(None)
 
     inner = MagicMock()
+    captured_states = []
     inner.astream = _astream_segments([
         [{"messages": [AIMessage(content="seg1-done")]}],
         [{"messages": [AIMessage(content="seg2-done")]}],
-    ])
+    ], captured_states=captured_states)
     monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
 
     spawner = DeepAgentsSpawner(
@@ -665,6 +673,11 @@ async def test_assign_task_runs_another_segment(monkeypatch):
     assert result["status"] == "success"
     assert result["output"] == "seg2-done"   # ran the second segment
     assert await registry.agent_store.drain_inbox("a1") == []
+
+    # Segment 2's input must include the queued follow-up task.
+    from langchain_core.messages import HumanMessage as _HM
+    seg2_human = [m for m in captured_states[1] if isinstance(m, _HM)]
+    assert any("do more" in m.content for m in seg2_human)
 
 
 @pytest.mark.asyncio
