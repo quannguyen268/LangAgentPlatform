@@ -254,6 +254,65 @@ async def test_spawn_agent_without_spawner_uses_placeholder():
     await registry.deregister(agents[0].agent_id)
 
 
+@pytest.fixture
+def registry_with_agent():
+    import asyncio
+    from langgraph.store.memory import InMemoryStore
+    from src.subagent.registry import SubAgentRegistry
+    from src.subagent.state import AgentInfo
+    registry = SubAgentRegistry(InMemoryStore())
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=["read_file"], skills=[])
+    registry.register(info, asyncio.get_event_loop().create_task(asyncio.sleep(0)))
+    return registry, info
+
+
+@pytest.mark.asyncio
+async def test_subscribe_tool_adds_to_info(registry_with_agent):
+    from src.subagent.tools import init_orchestration_tools, subscribe_tool
+    registry, info = registry_with_agent           # info.tools == ["read_file"]
+    init_orchestration_tools(registry, known_tools={"read_file", "web_search"})
+
+    out = await subscribe_tool.ainvoke({"agent_id": "a1", "tool_name": "web_search"})
+    assert "web_search" in info.tools
+    assert "web_search" in out
+
+
+@pytest.mark.asyncio
+async def test_subscribe_tool_rejects_unknown(registry_with_agent):
+    from src.subagent.tools import init_orchestration_tools, subscribe_tool
+    registry, info = registry_with_agent
+    init_orchestration_tools(registry, known_tools={"read_file"})
+
+    out = await subscribe_tool.ainvoke({"agent_id": "a1", "tool_name": "bogus"})
+    assert "bogus" not in info.tools
+    assert "Unknown tool" in out
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_tool_removes(registry_with_agent):
+    from src.subagent.tools import init_orchestration_tools, unsubscribe_tool
+    registry, info = registry_with_agent           # info.tools == ["read_file"]
+    init_orchestration_tools(registry, known_tools={"read_file"})
+
+    out = await unsubscribe_tool.ainvoke({"agent_id": "a1", "tool_name": "read_file"})
+    assert "read_file" not in info.tools
+    assert "read_file" in out
+
+
+@pytest.mark.asyncio
+async def test_subscribe_skill_records_and_nudges(registry_with_agent):
+    from src.subagent.tools import init_orchestration_tools, subscribe_skill
+    registry, info = registry_with_agent
+    init_orchestration_tools(registry, known_tools=set())
+
+    out = await subscribe_skill.ainvoke({"agent_id": "a1", "skill_name": "github"})
+    assert "github" in info.skills
+    inbox = await registry.agent_store.drain_inbox("a1")
+    assert any("github" in m["message"] for m in inbox)
+    assert "github" in out
+
+
 @pytest.mark.asyncio
 async def test_switch_agent_model_rejects_invalid_tier():
     """Invalid tier strings are rejected without mutating the agent."""

@@ -35,12 +35,14 @@ VALID_TIERS = frozenset({"lite", "standard", "advanced", "expert"})
 _registry: SubAgentRegistry | None = None
 _spawner: Callable | None = None          # async (info) → asyncio.Task
 _cost_tracker = None                        # CostTracker or None
+_known_tools: frozenset[str] = frozenset()  # valid tool names for subscribe_tool
 
 
 def init_orchestration_tools(
     registry: SubAgentRegistry,
     spawner: Optional[Callable] = None,
     cost_tracker=None,
+    known_tools: Optional[set[str]] = None,
 ) -> None:
     """Initialize module-level references for orchestration tools.
 
@@ -49,11 +51,14 @@ def init_orchestration_tools(
         spawner: async callable that creates the asyncio.Task for an agent
                  signature: async spawner(info: AgentInfo) → asyncio.Task
         cost_tracker: Optional CostTracker for review_cost
+        known_tools: Set of tool names that subscribe_tool may grant to agents.
+                     If omitted or None, defaults to an empty frozenset (no tools
+                     may be subscribed until this is populated).
 
     Safe to call multiple times — subsequent calls rebind the globals and log a
     warning. Typical production flow is a single call at agent startup.
     """
-    global _registry, _spawner, _cost_tracker
+    global _registry, _spawner, _cost_tracker, _known_tools
     if _registry is not None and _registry is not registry:
         logger.warning(
             "Orchestration tools re-initialized; previous registry (%r) replaced",
@@ -62,6 +67,7 @@ def init_orchestration_tools(
     _registry = registry
     _spawner = spawner
     _cost_tracker = cost_tracker
+    _known_tools = frozenset(known_tools or set())
 
 
 @tool
@@ -233,6 +239,67 @@ async def switch_agent_model(agent_id: str, tier: str) -> str:
         agent_id, action="change_tier", params={"tier": tier}
     )
     return f"Agent {agent_id} tier changed: {old_tier} → {tier}"
+
+
+@tool
+async def subscribe_tool(agent_id: str, tool_name: str) -> str:
+    """Add a tool to a running sub-agent. Takes effect on its next work segment.
+
+    Args:
+        agent_id: The agent to modify
+        tool_name: Name of a tool to grant (must be a known platform tool)
+    """
+    if _registry is None:
+        return "Error: orchestration not initialized"
+    info = _registry.get_agent(agent_id)
+    if info is None:
+        return f"Agent {agent_id} not found"
+    if tool_name not in _known_tools:
+        return f"Unknown tool '{tool_name}'. Available: {sorted(_known_tools)}"
+    if tool_name not in info.tools:
+        info.tools.append(tool_name)
+    return f"Tool '{tool_name}' subscribed to {agent_id} (effective next segment)."
+
+
+@tool
+async def unsubscribe_tool(agent_id: str, tool_name: str) -> str:
+    """Remove a tool from a running sub-agent. Takes effect on its next work segment.
+
+    Args:
+        agent_id: The agent to modify
+        tool_name: Name of the tool to revoke
+    """
+    if _registry is None:
+        return "Error: orchestration not initialized"
+    info = _registry.get_agent(agent_id)
+    if info is None:
+        return f"Agent {agent_id} not found"
+    if tool_name in info.tools:
+        info.tools.remove(tool_name)
+        return f"Tool '{tool_name}' unsubscribed from {agent_id} (effective next segment)."
+    return f"Agent {agent_id} did not have tool '{tool_name}'."
+
+
+@tool
+async def subscribe_skill(agent_id: str, skill_name: str) -> str:
+    """Make a skill a priority for a running sub-agent (nudged via its inbox).
+
+    Args:
+        agent_id: The agent to modify
+        skill_name: Name of the skill to prioritize
+    """
+    if _registry is None:
+        return "Error: orchestration not initialized"
+    info = _registry.get_agent(agent_id)
+    if info is None:
+        return f"Agent {agent_id} not found"
+    if skill_name not in info.skills:
+        info.skills.append(skill_name)
+    await _registry.agent_store.send_inbox(
+        agent_id, sender="master",
+        message=f"You now have access to the '{skill_name}' skill — use it when relevant.",
+    )
+    return f"Skill '{skill_name}' subscribed to {agent_id}."
 
 
 @tool
