@@ -189,16 +189,39 @@ class DeepAgentsSpawner:
         return _extract_last_text(result.get("messages", [])), False
 
     async def _stream_run(self, info: AgentInfo, messages: list) -> tuple[str, bool]:
-        """Drive the inner agent turn-by-turn via astream.
+        """Outer loop: run streaming segments until the inbox is empty or shutdown.
 
-        Per chunk: increment iteration, write heartbeat + progress, emit
-        agent_progress, and break early if a shutdown directive is pending.
-        Uses stream_mode="values" so each chunk is the full state snapshot; the
-        last snapshot carries the final messages.
+        Each segment is a full ``inner.astream`` run rebuilt from the agent's
+        current config (so subscribe_tool changes apply). Between segments — a
+        guaranteed-clean boundary — the inbox is drained: queued tasks become new
+        HumanMessages and trigger another segment. tier changes apply live via
+        the per-chunk ``change_tier`` directive.
         """
         agent_id = info.agent_id
         store = self._registry.agent_store
-        inner = self._build_inner(info)
+        first_segment = True
+
+        while True:
+            inner = self._build_inner(info)
+            messages, stopped, saw_step = await self._run_segment(inner, messages, info)
+
+            if stopped:                       # shutdown directive mid-segment
+                return _extract_last_text(messages), True
+            if first_segment and not saw_step:
+                raise RuntimeError(f"Sub-agent {agent_id}: astream produced no steps")
+            first_segment = False
+
+            # Clean boundary: drain inbox for follow-up work.
+            inbox = await store.drain_inbox(agent_id)
+            if not inbox:
+                return _extract_last_text(messages), False
+            for item in inbox:
+                messages = messages + [HumanMessage(content=item["message"])]
+
+    async def _run_segment(self, inner: Any, messages: list, info: AgentInfo) -> tuple[list, bool, bool]:
+        """Stream one inner run. Returns (final_messages, stopped, saw_step)."""
+        agent_id = info.agent_id
+        store = self._registry.agent_store
         state = {"messages": messages}
         final_state = state
         stopped = False
@@ -209,8 +232,7 @@ class DeepAgentsSpawner:
             async for chunk in stream:
                 final_state = chunk
                 if first:
-                    # stream_mode="values" echoes the input state as the first
-                    # chunk, before any agent step runs — not a step to count.
+                    # stream_mode="values" echoes the input state first — not a step.
                     first = False
                     continue
                 saw_step = True
@@ -225,13 +247,18 @@ class DeepAgentsSpawner:
                 )
 
                 directive = await store.read_directive(agent_id)
-                if directive and directive.get("action") == "shutdown":
-                    await store.clear_directive(agent_id)
-                    stopped = True
-                    logger.info("Sub-agent %s received shutdown directive; stopping", agent_id)
-                    break
+                if directive:
+                    action = directive.get("action")
+                    if action == "shutdown":
+                        await store.clear_directive(agent_id)
+                        stopped = True
+                        logger.info("Sub-agent %s received shutdown directive; stopping", agent_id)
+                        break
+                    if action == "change_tier":
+                        new_tier = directive.get("params", {}).get("tier")
+                        if new_tier:
+                            set_active_tier(new_tier)
+                            logger.info("Sub-agent %s tier → %s (live)", agent_id, new_tier)
+                        await store.clear_directive(agent_id)
 
-        if not stopped and not saw_step:
-            raise RuntimeError(f"Sub-agent {agent_id}: astream produced no steps")
-
-        return _extract_last_text(final_state.get("messages", [])), stopped
+        return final_state.get("messages", []), stopped, saw_step

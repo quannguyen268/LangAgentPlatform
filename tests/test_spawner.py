@@ -40,6 +40,26 @@ def _astream_raises(exc):
     return _astream
 
 
+def _astream_segments(segments):
+    """Fake astream where each call returns the next segment's chunks.
+
+    ``segments`` is a list of chunk-lists; call N yields segment N (preceded by
+    the input-state echo, mirroring stream_mode="values").
+    """
+    calls = {"n": 0}
+
+    def _astream(state, **kwargs):
+        idx = calls["n"]
+        calls["n"] += 1
+        chunks = segments[idx] if idx < len(segments) else []
+        async def _gen():
+            yield state
+            for c in chunks:
+                yield c
+        return _gen()
+    return _astream
+
+
 @pytest.mark.asyncio
 async def test_spawner_writes_heartbeat_and_result(monkeypatch):
     """Spawner runs the inner agent and writes heartbeat + result to the store."""
@@ -610,3 +630,105 @@ async def test_streaming_prepends_skills_hint(monkeypatch):
 
     assert captured["content"].startswith("Prioritize these skills for this work: code_review.")
     assert "the task" in captured["content"]
+
+
+@pytest.mark.asyncio
+async def test_assign_task_runs_another_segment(monkeypatch):
+    """A task in the inbox is consumed after the current segment, running another."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+
+    inner = MagicMock()
+    inner.astream = _astream_segments([
+        [{"messages": [AIMessage(content="seg1-done")]}],
+        [{"messages": [AIMessage(content="seg2-done")]}],
+    ])
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+    )
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+
+    # Queue a follow-up task BEFORE running so segment 1's boundary drains it.
+    await registry.agent_store.send_inbox("a1", sender="master", message="do more")
+
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    result = await registry.agent_store.read_result("a1")
+    assert result["status"] == "success"
+    assert result["output"] == "seg2-done"   # ran the second segment
+    assert await registry.agent_store.drain_inbox("a1") == []
+
+
+@pytest.mark.asyncio
+async def test_no_inbox_finishes_after_one_segment(monkeypatch):
+    """With an empty inbox, the agent finishes after one segment."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+
+    inner = MagicMock()
+    inner.astream = _astream_segments([[{"messages": [AIMessage(content="only")]}]])
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+    )
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    result = await registry.agent_store.read_result("a1")
+    assert result["output"] == "only"
+    assert registry.get_agent("a1").state == SubAgentState.FINISHED
+
+
+@pytest.mark.asyncio
+async def test_change_tier_directive_applies_live(monkeypatch):
+    """A change_tier directive switches the active tier mid-segment."""
+    import src.tools.model_router as mr
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+
+    seen_tiers = []
+    inner = MagicMock()
+
+    def _astream(state, **kwargs):
+        async def _gen():
+            yield state
+            seen_tiers.append(mr._active_tier.get())          # before directive
+            yield {"messages": [AIMessage(content="s1")]}
+            seen_tiers.append(mr._active_tier.get())          # after directive applied
+            yield {"messages": [AIMessage(content="s2")]}
+        return _gen()
+    inner.astream = _astream
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+    )
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    await registry.agent_store.write_directive("a1", action="change_tier", params={"tier": "expert"})
+
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert seen_tiers[0] == "standard"   # initial
+    assert seen_tiers[1] == "expert"     # changed after first chunk's directive check
+    assert await registry.agent_store.read_directive("a1") is None  # consumed
