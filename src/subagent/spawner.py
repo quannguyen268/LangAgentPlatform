@@ -162,12 +162,18 @@ class DeepAgentsSpawner:
         store = self._registry.agent_store
         final_state = state
         stopped = False
-        saw_chunk = False
+        saw_step = False
 
         async with aclosing(inner.astream(state, stream_mode="values")) as stream:
+            first = True
             async for chunk in stream:
-                saw_chunk = True
                 final_state = chunk
+                if first:
+                    # stream_mode="values" echoes the input state as the first
+                    # chunk, before any agent step runs — not a step to count.
+                    first = False
+                    continue
+                saw_step = True
                 self._registry.increment_iteration(agent_id)
                 iteration = self._registry.get_agent(agent_id).iteration
                 preview = _extract_last_text(chunk.get("messages", []))[:_PROGRESS_PREVIEW_CHARS]
@@ -185,7 +191,7 @@ class DeepAgentsSpawner:
                     logger.info("Sub-agent %s received shutdown directive; stopping", agent_id)
                     break
 
-        if not stopped and not saw_chunk:
-            raise RuntimeError(f"Sub-agent {agent_id}: astream produced no chunks")
+        if not stopped and not saw_step:
+            raise RuntimeError(f"Sub-agent {agent_id}: astream produced no steps")
 
         return _extract_last_text(final_state.get("messages", [])), stopped

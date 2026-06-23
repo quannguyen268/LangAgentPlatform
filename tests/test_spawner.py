@@ -23,6 +23,7 @@ def _astream_factory(chunks, captured=None):
             captured["content"] = state["messages"][0].content
 
         async def _gen():
+            yield state  # mirror stream_mode="values": input snapshot echoed first
             for c in chunks:
                 yield c
         return _gen()
@@ -470,4 +471,4 @@ async def test_streaming_empty_stream_fails(monkeypatch):
     await asyncio.wait_for(task, timeout=5.0)
 
     assert registry.get_agent("a1").state == SubAgentState.FAILED
-    assert "no chunks" in (registry.get_agent("a1").error or "")
+    assert "no steps" in (registry.get_agent("a1").error or "")
