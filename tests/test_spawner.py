@@ -472,3 +472,89 @@ async def test_streaming_empty_stream_fails(monkeypatch):
 
     assert registry.get_agent("a1").state == SubAgentState.FAILED
     assert "no steps" in (registry.get_agent("a1").error or "")
+
+
+def test_build_inner_passes_backend_and_skills(monkeypatch):
+    """_build_inner wires backend + skills into create_deep_agent when configured."""
+    from src.subagent.spawner import DeepAgentsSpawner
+    from src.subagent.state import AgentInfo
+    from src.subagent.registry import SubAgentRegistry
+    from src.subagent.broadcaster import EventBroadcaster
+    from langgraph.store.memory import InMemoryStore
+
+    captured = {}
+    monkeypatch.setattr(
+        "src.subagent.spawner.create_deep_agent",
+        lambda **kw: captured.update(kw) or MagicMock(),
+    )
+    spawner = DeepAgentsSpawner(
+        registry=SubAgentRegistry(InMemoryStore()), broadcaster=EventBroadcaster(None),
+        base_model=MagicMock(), tools_by_name={"read_file": object()},
+        workspace="/tmp/ws", skills_dirs=["skills"],
+    )
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=["read_file"], skills=[])
+    spawner._build_inner(info)
+
+    assert "backend" in captured           # FilesystemBackend wired
+    assert captured.get("skills") == ["skills"]
+    assert len(captured["tools"]) == 1
+
+
+def test_build_inner_omits_backend_when_no_workspace(monkeypatch):
+    """With no workspace, _build_inner does not pass a backend or skills."""
+    from src.subagent.spawner import DeepAgentsSpawner
+    from src.subagent.state import AgentInfo
+    from src.subagent.registry import SubAgentRegistry
+    from src.subagent.broadcaster import EventBroadcaster
+    from langgraph.store.memory import InMemoryStore
+
+    captured = {}
+    monkeypatch.setattr(
+        "src.subagent.spawner.create_deep_agent",
+        lambda **kw: captured.update(kw) or MagicMock(),
+    )
+    spawner = DeepAgentsSpawner(
+        registry=SubAgentRegistry(InMemoryStore()), broadcaster=EventBroadcaster(None),
+        base_model=MagicMock(), tools_by_name={},
+    )
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    spawner._build_inner(info)
+
+    assert "backend" not in captured
+    assert "skills" not in captured
+
+
+@pytest.mark.asyncio
+async def test_spawn_sets_active_tier(monkeypatch):
+    """The sub-agent sets its tier on its own task at spawn."""
+    import src.tools.model_router as mr
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+
+    seen = {}
+    inner = MagicMock()
+
+    def _astream(state, **kwargs):
+        seen["tier"] = mr._active_tier.get()
+        async def _gen():
+            yield state
+            yield {"messages": [AIMessage(content="done")]}
+        return _gen()
+    inner.astream = _astream
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+    )
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="advanced", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert seen["tier"] == "advanced"

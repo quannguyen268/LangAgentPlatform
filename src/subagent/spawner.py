@@ -23,8 +23,10 @@ from contextlib import aclosing
 from typing import Any, Optional
 
 from deepagents import create_deep_agent
+from deepagents.backends import FilesystemBackend
 from langchain_core.messages import AIMessage, HumanMessage
 
+from ..tools.model_router import set_active_tier
 from .broadcaster import EventBroadcaster
 from .registry import SubAgentRegistry
 from .state import AgentInfo, SubAgentState
@@ -57,12 +59,44 @@ class DeepAgentsSpawner:
         base_model: Any,
         tools_by_name: dict[str, Any],
         streaming: bool = True,
+        workspace: str | None = None,
+        skills_dirs: list[str] | None = None,
     ):
         self._registry = registry
         self._broadcaster = broadcaster
         self._base_model = base_model
         self._tools_by_name = tools_by_name
         self._streaming = streaming
+        self._workspace = workspace
+        self._skills_dirs = skills_dirs
+
+    def _build_inner(self, info: AgentInfo) -> Any:
+        """Construct the inner DeepAgents instance for this agent's current config.
+
+        Rebuilt each segment so tool changes (subscribe_tool/unsubscribe_tool)
+        take effect. Raises ValueError on an unknown tool name — a config bug,
+        surfaced loudly (and create_deep_agent is not called).
+        """
+        missing = [n for n in info.tools if n not in self._tools_by_name]
+        if missing:
+            raise ValueError(
+                f"Unknown tools requested by {info.agent_id}: {missing}. "
+                f"Available: {sorted(self._tools_by_name)}"
+            )
+        tools = [self._tools_by_name[n] for n in info.tools]
+        kwargs: dict = {"model": self._base_model, "tools": tools}
+        if self._workspace:
+            kwargs["backend"] = FilesystemBackend(root_dir=self._workspace, virtual_mode=True)
+        if self._skills_dirs:
+            kwargs["skills"] = self._skills_dirs
+        return create_deep_agent(**kwargs)
+
+    @staticmethod
+    def _skills_hint(info: AgentInfo) -> str | None:
+        """A prompt nudge listing the agent's subscribed skills, or None."""
+        if not info.skills:
+            return None
+        return f"Prioritize these skills for this work: {', '.join(info.skills)}."
 
     async def spawn(self, info: AgentInfo, recovery_context: Optional[str] = None) -> asyncio.Task:
         """Create the asyncio.Task that runs this sub-agent."""
@@ -75,34 +109,36 @@ class DeepAgentsSpawner:
 
         try:
             # --- prologue (shared by both execution paths) ---
+            # Validate tools up-front (also re-checked per build in _build_inner).
             missing = [n for n in info.tools if n not in self._tools_by_name]
             if missing:
                 raise ValueError(
                     f"Unknown tools requested by {agent_id}: {missing}. "
                     f"Available: {sorted(self._tools_by_name)}"
                 )
-            tools = [self._tools_by_name[n] for n in info.tools]
 
             self._broadcaster.agent_spawned(
                 agent_id=agent_id, name=info.name, role=info.role, tier=info.tier,
             )
             await store.write_heartbeat(agent_id, iteration=0, status="starting")
 
-            inner = create_deep_agent(
-                model=self._base_model,
-                tools=tools,
-            )
+            # Scope this sub-agent's tier to its own asyncio task. Effective only
+            # when base_model is the RoutingChatModel; a harmless no-op otherwise.
+            set_active_tier(info.tier)
 
             task_text = info.task
             if recovery_context:
                 task_text = f"{recovery_context}\n\n---\n\nTask: {info.task}"
-            state = {"messages": [HumanMessage(content=task_text)]}
+            hint = self._skills_hint(info)
+            if hint:
+                task_text = f"{hint}\n\n{task_text}"
+            messages = [HumanMessage(content=task_text)]
 
             await store.write_heartbeat(agent_id, iteration=1, status="running")
             self._registry.update_state(agent_id, SubAgentState.RUNNING)
 
             # --- execute (streaming default; streaming=False for single-shot fallback) ---
-            output, stopped = await self._execute(inner, state, info)
+            output, stopped = await self._execute(info, messages)
 
             # --- epilogue (shared) ---
             status = "stopped" if stopped else "success"
@@ -139,18 +175,19 @@ class DeepAgentsSpawner:
             )
             logger.exception("Sub-agent %s failed", agent_id)
 
-    async def _execute(self, inner: Any, state: dict, info: AgentInfo) -> tuple[str, bool]:
+    async def _execute(self, info: AgentInfo, messages: list) -> tuple[str, bool]:
         """Run the inner agent and return (output, stopped).
 
         ``stopped`` is True only when a shutdown directive ended a streaming run
         early. Single-shot runs always return stopped=False.
         """
         if self._streaming:
-            return await self._stream_run(inner, state, info)
-        result = await inner.ainvoke(state)
+            return await self._stream_run(info, messages)
+        inner = self._build_inner(info)
+        result = await inner.ainvoke({"messages": messages})
         return _extract_last_text(result.get("messages", [])), False
 
-    async def _stream_run(self, inner: Any, state: dict, info: AgentInfo) -> tuple[str, bool]:
+    async def _stream_run(self, info: AgentInfo, messages: list) -> tuple[str, bool]:
         """Drive the inner agent turn-by-turn via astream.
 
         Per chunk: increment iteration, write heartbeat + progress, emit
@@ -160,6 +197,8 @@ class DeepAgentsSpawner:
         """
         agent_id = info.agent_id
         store = self._registry.agent_store
+        inner = self._build_inner(info)
+        state = {"messages": messages}
         final_state = state
         stopped = False
         saw_step = False
