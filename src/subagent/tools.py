@@ -234,6 +234,9 @@ async def switch_agent_model(agent_id: str, tier: str) -> str:
         return f"Agent {agent_id} not found"
 
     old_tier = info.tier
+    # info.tier is display/respawn state (shown by monitor_agents, used when a
+    # recovery respawn re-reads it). The live-segment authority is the directive
+    # below: the spawner applies it via set_active_tier per chunk.
     info.tier = tier
     await _registry.agent_store.write_directive(
         agent_id, action="change_tier", params={"tier": tier}
