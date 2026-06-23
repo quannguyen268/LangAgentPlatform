@@ -131,6 +131,7 @@ class DeepAgentsSpawner:
                 task_text = f"{recovery_context}\n\n---\n\nTask: {info.task}"
             hint = self._skills_hint(info)
             if hint:
+                # Hint leads so it reads as a directive ahead of the recovery/task narrative.
                 task_text = f"{hint}\n\n{task_text}"
             messages = [HumanMessage(content=task_text)]
 
