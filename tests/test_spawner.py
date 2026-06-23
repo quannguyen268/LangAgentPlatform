@@ -11,8 +11,6 @@ from src.subagent.registry import SubAgentRegistry
 from src.subagent.spawner import DeepAgentsSpawner
 from src.subagent.state import AgentInfo, SubAgentState
 
-from contextlib import suppress  # noqa: F401  (kept for symmetry with async helpers)
-
 
 def _astream_factory(chunks, captured=None):
     """Return a fake ``astream(state, **kwargs)`` yielding the given chunks.
@@ -441,3 +439,29 @@ async def test_streaming_prepends_recovery_context(monkeypatch):
 
     assert "Resuming after failure X" in captured["content"]
     assert "Task: the original task" in captured["content"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_empty_stream_fails(monkeypatch):
+    """A stream that yields no chunks fails loudly rather than reporting empty success."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+
+    inner = MagicMock()
+    inner.astream = _astream_factory([])  # zero chunks
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+    )
+    info = AgentInfo(agent_id="a1", name="n1", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert registry.get_agent("a1").state == SubAgentState.FAILED
+    assert "no chunks" in (registry.get_agent("a1").error or "")
