@@ -290,6 +290,7 @@ class SubAgentConfig(BaseModel):
     max_iterations: int = 50
     max_retries: int = 1
     health_check_interval: float = 30.0
+    streaming: bool = True  # WS1: drive sub-agents via astream loop (False = single-shot fallback)
 
 
 class SwarmConfig(BaseModel):

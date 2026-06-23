@@ -30,6 +30,8 @@ from .state import AgentInfo, SubAgentState
 
 logger = logging.getLogger(__name__)
 
+_PROGRESS_PREVIEW_CHARS = 200
+
 
 def _extract_last_text(messages: list) -> str:
     """Return the content of the last AIMessage, or '' if none."""
@@ -53,11 +55,13 @@ class DeepAgentsSpawner:
         broadcaster: EventBroadcaster,
         base_model: Any,
         tools_by_name: dict[str, Any],
+        streaming: bool = False,
     ):
         self._registry = registry
         self._broadcaster = broadcaster
         self._base_model = base_model
         self._tools_by_name = tools_by_name
+        self._streaming = streaming
 
     async def spawn(self, info: AgentInfo, recovery_context: Optional[str] = None) -> asyncio.Task:
         """Create the asyncio.Task that runs this sub-agent."""
@@ -69,8 +73,7 @@ class DeepAgentsSpawner:
         store = self._registry.agent_store
 
         try:
-            # Resolve tools — error loudly on unknown names (likely a config bug,
-            # not a recoverable runtime condition)
+            # --- prologue (shared by both execution paths) ---
             missing = [n for n in info.tools if n not in self._tools_by_name]
             if missing:
                 raise ValueError(
@@ -79,36 +82,31 @@ class DeepAgentsSpawner:
                 )
             tools = [self._tools_by_name[n] for n in info.tools]
 
-            # Emit spawn + heartbeat
             self._broadcaster.agent_spawned(
                 agent_id=agent_id, name=info.name, role=info.role, tier=info.tier,
             )
             await store.write_heartbeat(agent_id, iteration=0, status="starting")
 
-            # Build inner agent (Phase 2A: no nested middleware; keep it simple.
-            # Sub-agents intentionally omit checkpointer, interrupt_on, and
-            # middleware — those belong to the master graph, not per-sub-agent.)
             inner = create_deep_agent(
                 model=self._base_model,
                 tools=tools,
             )
 
-            # Compose initial message — prepend recovery context if this is a respawn
             task_text = info.task
             if recovery_context:
                 task_text = f"{recovery_context}\n\n---\n\nTask: {info.task}"
             state = {"messages": [HumanMessage(content=task_text)]}
 
             await store.write_heartbeat(agent_id, iteration=1, status="running")
-            # Transition to RUNNING immediately before ainvoke so the state
-            # accurately reflects actual execution (not just readiness).
             self._registry.update_state(agent_id, SubAgentState.RUNNING)
-            result = await inner.ainvoke(state)
 
-            # Extract output
-            output = _extract_last_text(result.get("messages", []))
+            # --- execute (branches in Task 2; single-shot for now) ---
+            output, stopped = await self._execute(inner, state, info)
+
+            # --- epilogue (shared) ---
+            status = "stopped" if stopped else "success"
             await store.write_result(
-                agent_id, status="success", output=output, cost_total=info.cost_cents,
+                agent_id, status=status, output=output, cost_total=info.cost_cents,
             )
             info.result = output
             info.finished_at = time.time()
@@ -116,7 +114,7 @@ class DeepAgentsSpawner:
             self._broadcaster.agent_completed(
                 agent_id=agent_id, result=output, cost_total_cents=info.cost_cents,
             )
-            logger.info("Sub-agent %s completed", agent_id)
+            logger.info("Sub-agent %s completed (status=%s)", agent_id, status)
 
         except asyncio.CancelledError:
             logger.info("Sub-agent %s cancelled", agent_id)
@@ -139,3 +137,12 @@ class DeepAgentsSpawner:
                 agent_id=agent_id, reason=type(e).__name__, action="pending",
             )
             logger.exception("Sub-agent %s failed", agent_id)
+
+    async def _execute(self, inner: Any, state: dict, info: AgentInfo) -> tuple[str, bool]:
+        """Run the inner agent and return (output, stopped).
+
+        ``stopped`` is True only when a shutdown directive ended a streaming run
+        early. Single-shot runs always return stopped=False.
+        """
+        result = await inner.ainvoke(state)
+        return _extract_last_text(result.get("messages", [])), False
