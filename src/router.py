@@ -270,7 +270,9 @@ class MessageRouter:
 
     def _log_message(self, thread_id: str, role: str, content: str, msg: IncomingMessage) -> None:
         """Append message to JSONL session log."""
-        sessions_dir = Path(self._workspace, "sessions")
+        # Session logs are persistent runtime data — they live under data_dir
+        # alongside checkpoints.db and session_counters.json (not the workspace).
+        sessions_dir = Path(self._data_dir, "sessions")
         sessions_dir.mkdir(parents=True, exist_ok=True)
 
         log_path = sessions_dir / f"{thread_id}.jsonl"

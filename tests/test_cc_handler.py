@@ -302,7 +302,7 @@ class TestCcCommands:
     @pytest.mark.asyncio
     async def test_cc_model_haiku_shortcut(self, handler, mock_bridge, mock_send):
         await handler.process_message("u1", "cc:model haiku", 123)
-        mock_bridge.set_model.assert_called_once_with("u1", "claude-haiku-4-5-20251001")
+        mock_bridge.set_model.assert_called_once_with("u1", "claude-haiku-4-5")
 
     @pytest.mark.asyncio
     async def test_cc_model_full_id_passthrough(self, handler, mock_bridge, mock_send):
@@ -903,8 +903,10 @@ class TestGetConversationMessages:
         total, messages = bridge.get_conversation_messages("proj-a", "sess-1", max_messages=3)
         assert total == 5
         assert len(messages) == 3
-        assert messages[0] == ("assistant", "reply 2")
-        assert messages[1] == ("user", "msg 3")
+        # max_messages=3 returns the last 3 in chronological order: msg2, reply2, msg3
+        assert messages[0] == ("user", "msg 2")
+        assert messages[1] == ("assistant", "reply 2")
+        assert messages[2] == ("user", "msg 3")
 
     def test_empty_file(self, tmp_path):
         proj_dir = tmp_path / "projects" / "proj-a"

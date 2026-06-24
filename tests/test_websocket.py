@@ -86,6 +86,7 @@ async def test_event_hub_unsubscribe_on_exit():
     # Wake the subscriber so it can break and clean up
     hub.broadcast(token_event("trigger", user_id="u1"))
     await asyncio.wait_for(done.wait(), timeout=2.0)
+    await asyncio.sleep(0)  # let asyncio's asyncgen finalizer run subscribe()'s cleanup
 
     assert hub.subscriber_count == 0
     await task

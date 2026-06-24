@@ -280,9 +280,10 @@ class TestTimeoutValidation:
         handler.do_POST()
 
         handler.send_response.assert_called_once_with(200)
-        # timeout=0 after clamping → uses DEFAULT_TIMEOUT (30)
+        # negative is clamped to 0, and 0 means "no limit" (None disables the
+        # subprocess timeout) — matching the client contract (client.py: 0 = no timeout)
         _, kwargs = mock_subprocess.run.call_args
-        assert kwargs["timeout"] == 30
+        assert kwargs["timeout"] is None
 
     @patch("src.gateway.server.TOKEN", "test-token")
     @patch("src.gateway.server._ALLOWLISTS", {"claude-code": {"claude"}})
@@ -310,7 +311,7 @@ class TestTimeoutValidation:
     @patch("src.gateway.server._CWD_ALLOWLISTS", {})
     @patch("src.gateway.server.DEFAULT_TIMEOUT", 30)
     @patch("src.gateway.server.subprocess")
-    def test_zero_timeout_uses_default(self, mock_subprocess):
+    def test_zero_timeout_means_no_limit(self, mock_subprocess):
         mock_result = MagicMock()
         mock_result.stdout = ""
         mock_result.stderr = ""
@@ -324,4 +325,4 @@ class TestTimeoutValidation:
 
         handler.send_response.assert_called_once_with(200)
         _, kwargs = mock_subprocess.run.call_args
-        assert kwargs["timeout"] == 30  # DEFAULT_TIMEOUT
+        assert kwargs["timeout"] is None  # 0 explicitly means "no limit" (None)
