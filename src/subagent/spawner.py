@@ -221,7 +221,11 @@ class DeepAgentsSpawner:
             return await self._stream_run(info, messages)
         inner = self._build_inner(info)
         result = await inner.ainvoke({"messages": messages})
-        return _extract_last_text(result.get("messages", [])), False
+        msgs = result.get("messages", [])
+        # ainvoke returns a single final state (no cumulative re-emission), so
+        # every AIMessage appears once — no dedup needed here.
+        self._record_costs(info, msgs)
+        return _extract_last_text(msgs), False
 
     async def _stream_run(self, info: AgentInfo, messages: list) -> tuple[str, bool]:
         """Outer loop: run streaming segments until the inbox is empty or shutdown.

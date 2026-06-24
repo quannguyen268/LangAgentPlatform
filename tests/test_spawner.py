@@ -927,3 +927,32 @@ async def test_cost_not_recounted_across_segments(monkeypatch):
     # Each of the two AIMessages costed exactly once: 0.105 * 2 = 0.21, calls=2.
     assert cost_tracker.by_agent()["a1"]["calls"] == 2
     assert registry.get_agent("a1").cost_cents == pytest.approx(0.21, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_single_shot_records_cost(monkeypatch):
+    """The streaming=False fallback also records cost from the final message list."""
+    from src.observability.cost import CostTracker
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+    cost_tracker = CostTracker()
+
+    inner = MagicMock()
+    inner.ainvoke = AsyncMock(return_value={"messages": [_ai_with_usage("done")]})
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=False,
+        cost_tracker=cost_tracker,
+    )
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert registry.get_agent("a1").cost_cents == pytest.approx(0.105, rel=1e-3)
+    assert cost_tracker.by_agent()["a1"]["calls"] == 1
