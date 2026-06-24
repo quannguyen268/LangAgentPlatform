@@ -199,3 +199,84 @@ async def test_rollback_clears_team_agents_mapping():
 
     # No team_id was returned, so nothing should be in _team_agents
     assert swarm._team_agents == {}
+
+
+# ---------------------------------------------------------------------------
+# WS4 Task 2: phase-aware launch + activate_phase
+# ---------------------------------------------------------------------------
+
+class _FakeSpawner:
+    def __init__(self):
+        self.spawned = []
+
+    async def spawn(self, info, recovery_context=None):
+        self.spawned.append(info.agent_id)
+        return asyncio.create_task(asyncio.sleep(0))
+
+
+def _phased_template():
+    return TeamTemplate(
+        name="t", goal="g", phases=["plan", "execute"],
+        agents=[
+            AgentTemplate(name="architect", role="planner", tier="standard",
+                          task_prompt="plan it", tools=[], skills=[], phase="plan"),
+            AgentTemplate(name="dev", role="executor", tier="standard",
+                          task_prompt="build it", tools=[], skills=[], phase="execute"),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_phased_launch_activates_only_first_phase():
+    registry = SubAgentRegistry(InMemoryStore())
+    spawner = _FakeSpawner()
+    swarm = Swarm(registry=registry, broadcaster=EventBroadcaster(None),
+                  spawner=spawner, workspace="/tmp/ws")
+    team_id = await swarm.launch(_phased_template())
+    assert len(spawner.spawned) == 1
+    assert len(swarm.get_team_agents(team_id)) == 1
+    assert swarm.get_harness(team_id).current_phase == "plan"
+
+
+@pytest.mark.asyncio
+async def test_activate_phase_spawns_that_phases_agents():
+    registry = SubAgentRegistry(InMemoryStore())
+    spawner = _FakeSpawner()
+    swarm = Swarm(registry=registry, broadcaster=EventBroadcaster(None),
+                  spawner=spawner, workspace="/tmp/ws")
+    team_id = await swarm.launch(_phased_template())
+    new_ids = await swarm.activate_phase(team_id, "execute")
+    assert len(new_ids) == 1
+    assert len(spawner.spawned) == 2
+    assert len(swarm.get_team_agents(team_id)) == 2
+
+
+@pytest.mark.asyncio
+async def test_phased_launch_defaults_gate_for_agent_phases():
+    from src.swarm.phases import HarnessContext
+    registry = SubAgentRegistry(InMemoryStore())
+    spawner = _FakeSpawner()
+    swarm = Swarm(registry=registry, broadcaster=EventBroadcaster(None),
+                  spawner=spawner, workspace="/tmp/ws")
+    team_id = await swarm.launch(_phased_template())
+    runner = swarm.get_harness(team_id)
+    ctx = HarnessContext(workspace="/tmp/ws", registry=registry)
+    advanced = await runner.try_advance(ctx)   # plan agent unfinished → blocked
+    assert advanced is False
+    assert runner.current_phase == "plan"
+
+
+@pytest.mark.asyncio
+async def test_legacy_launch_spawns_all_at_once():
+    registry = SubAgentRegistry(InMemoryStore())
+    spawner = _FakeSpawner()
+    swarm = Swarm(registry=registry, broadcaster=EventBroadcaster(None),
+                  spawner=spawner, workspace="/tmp/ws")
+    tmpl = TeamTemplate(name="t", goal="g", phases=["plan", "execute"],
+                        agents=[AgentTemplate(name="a", role="executor", tier="standard",
+                                              task_prompt="x", tools=[], skills=[]),
+                                AgentTemplate(name="b", role="executor", tier="standard",
+                                              task_prompt="y", tools=[], skills=[])])
+    team_id = await swarm.launch(tmpl)
+    assert len(spawner.spawned) == 2
+    assert len(swarm.get_team_agents(team_id)) == 2

@@ -24,7 +24,7 @@ from ..subagent.broadcaster import EventBroadcaster
 from ..subagent.registry import SubAgentRegistry
 from ..subagent.state import AgentInfo
 from .harness import HarnessRunner
-from .phases import PhaseGate
+from .phases import AllTasksCompleteGate, PhaseGate
 from .templates import TeamTemplate
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,9 @@ class Swarm:
         self._workspace = workspace  # T13: fed into HarnessContext at run time
         self._teams: dict[str, HarnessRunner] = {}
         self._team_agents: dict[str, list[str]] = {}
+        self._team_templates: dict[str, TeamTemplate] = {}
+        self._team_goals: dict[str, str] = {}
+        self._team_approvals: dict[str, set[str]] = {}
 
     def _new_team_id(self) -> str:
         while True:
@@ -67,13 +70,42 @@ class Swarm:
             if self._registry.get_agent(agent_id) is None:
                 return agent_id
 
+    async def _spawn_one(self, team_id: str, agent_tpl, goal: str) -> str:
+        """Spawn + register one agent for a team. Returns the agent_id."""
+        agent_id = self._new_agent_id()
+        info = AgentInfo(
+            agent_id=agent_id,
+            name=agent_tpl.name,
+            role=agent_tpl.role,
+            task=f"Team goal: {goal}\n\n{agent_tpl.task_prompt}",
+            tier=agent_tpl.tier,
+            tools=list(agent_tpl.tools),
+            skills=list(agent_tpl.skills),
+        )
+        task = await self._spawner.spawn(info)
+        self._registry.register(info, task)
+        self._team_agents[team_id].append(agent_id)
+        logger.info(
+            "Spawned team member %s (agent_id=%s, role=%s, phase=%s)",
+            agent_tpl.name, agent_id, agent_tpl.role, agent_tpl.phase,
+        )
+        return agent_id
+
     async def launch(
         self,
         template: TeamTemplate,
         goal_override: str | None = None,
         gates: dict[str, PhaseGate] | None = None,
     ) -> str:
-        """Spawn every agent in the template. Returns a team_id.
+        """Spawn the initial agents for the template. Returns a team_id.
+
+        For phased templates (``template.is_phased``), only the first phase's
+        agents are spawned immediately; remaining phases are activated later via
+        ``activate_phase``. Phased phases with agents but no explicit gate
+        default to ``AllTasksCompleteGate``.
+
+        For legacy (non-phased) templates, all agents are spawned at once,
+        preserving the previous behavior.
 
         Raises:
             ValueError: if ``gates`` keys are not a subset of ``template.phases``
@@ -84,57 +116,76 @@ class Swarm:
         """
         # Fail-fast validation before any spawn, so an invalid gate set does
         # not leave partially-launched agents behind.
-        gates = gates or {}
-        unknown_gates = set(gates.keys()) - set(template.phases)
+        gates = dict(gates or {})
+        unknown_gates = set(gates) - set(template.phases)
         if unknown_gates:
             raise ValueError(
                 f"Swarm.launch: gates reference unknown phases: {sorted(unknown_gates)}"
             )
 
+        # For phased templates, default-gate every phase that has agents.
+        if template.is_phased:
+            for ph in template.phases:
+                if ph not in gates and template.agents_for_phase(ph):
+                    gates[ph] = AllTasksCompleteGate()
+
         team_id = self._new_team_id()
         goal = goal_override or template.goal
-        spawned_ids: list[str] = []
+        self._team_agents[team_id] = []
+        self._team_templates[team_id] = template
+        self._team_goals[team_id] = goal
+        self._team_approvals[team_id] = set()
 
         try:
-            for agent_tpl in template.agents:
-                agent_id = self._new_agent_id()
-                info = AgentInfo(
-                    agent_id=agent_id,
-                    name=agent_tpl.name,
-                    role=agent_tpl.role,
-                    task=f"Team goal: {goal}\n\n{agent_tpl.task_prompt}",
-                    tier=agent_tpl.tier,
-                    tools=list(agent_tpl.tools),
-                    skills=list(agent_tpl.skills),
-                )
-                task = await self._spawner.spawn(info)
-                self._registry.register(info, task)
-                spawned_ids.append(agent_id)
-                logger.info(
-                    "Launched team member %s (agent_id=%s, role=%s)",
-                    agent_tpl.name, agent_id, agent_tpl.role,
-                )
+            if template.is_phased:
+                for agent_tpl in template.agents_for_phase(template.phases[0]):
+                    await self._spawn_one(team_id, agent_tpl, goal)
+            else:
+                for agent_tpl in template.agents:
+                    await self._spawn_one(team_id, agent_tpl, goal)
         except Exception:
-            logger.exception(
-                "Team %s launch failed after %d/%d agents; rolling back",
-                team_id, len(spawned_ids), len(template.agents),
-            )
-            await self._rollback(spawned_ids)
+            logger.exception("Team %s launch failed; rolling back", team_id)
+            await self._rollback(self._team_agents.get(team_id, []))
+            self._team_agents.pop(team_id, None)
+            self._team_templates.pop(team_id, None)
+            self._team_goals.pop(team_id, None)
+            self._team_approvals.pop(team_id, None)
             raise
 
         # Invariant: ``team_id`` is present in ``_teams`` iff present in
         # ``_team_agents``. These two writes must stay paired with no awaits
         # between them so the API view (`GET /v1/teams`) cannot observe a
         # team without its agent ids.
-        self._teams[team_id] = HarnessRunner(
-            phases=template.phases, gates=gates,
-        )
-        self._team_agents[team_id] = list(spawned_ids)
+        self._teams[team_id] = HarnessRunner(phases=template.phases, gates=gates)
         logger.info(
-            "Team %s launched with %d agents across %d phases",
-            team_id, len(template.agents), len(template.phases),
+            "Team %s launched (%s mode) with %d agent(s); phases=%s",
+            team_id, "phased" if template.is_phased else "legacy",
+            len(self._team_agents[team_id]), template.phases,
         )
         return team_id
+
+    async def activate_phase(self, team_id: str, phase: str) -> list[str]:
+        """Spawn the agents declared for ``phase``. Returns their agent_ids.
+
+        Returns [] for an unknown team or a phase with no declared agents.
+        """
+        template = self._team_templates.get(team_id)
+        if template is None:
+            return []
+        goal = self._team_goals.get(team_id, template.goal)
+        new_ids: list[str] = []
+        for agent_tpl in template.agents_for_phase(phase):
+            new_ids.append(await self._spawn_one(team_id, agent_tpl, goal))
+        if new_ids:
+            logger.info(
+                "Team %s activated phase %s with %d agent(s)",
+                team_id, phase, len(new_ids),
+            )
+        return new_ids
+
+    def get_approvals(self, team_id: str) -> set[str]:
+        """The mutable approvals set for a team (consumed by HumanApprovalGate)."""
+        return self._team_approvals.setdefault(team_id, set())
 
     async def _rollback(self, spawned_ids: list[str]) -> None:
         """Cancel + deregister every agent registered so far for a failed launch."""
