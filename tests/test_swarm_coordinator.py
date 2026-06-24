@@ -199,6 +199,9 @@ async def test_rollback_clears_team_agents_mapping():
 
     # No team_id was returned, so nothing should be in _team_agents
     assert swarm._team_agents == {}
+    assert swarm._team_templates == {}
+    assert swarm._team_goals == {}
+    assert swarm._team_approvals == {}
 
 
 # ---------------------------------------------------------------------------
@@ -280,3 +283,12 @@ async def test_legacy_launch_spawns_all_at_once():
     team_id = await swarm.launch(tmpl)
     assert len(spawner.spawned) == 2
     assert len(swarm.get_team_agents(team_id)) == 2
+
+
+@pytest.mark.asyncio
+async def test_activate_phase_unknown_team_raises():
+    registry = SubAgentRegistry(InMemoryStore())
+    swarm = Swarm(registry=registry, broadcaster=EventBroadcaster(None),
+                  spawner=_FakeSpawner(), workspace="/tmp/ws")
+    with pytest.raises(ValueError):
+        await swarm.activate_phase("no-such-team", "plan")

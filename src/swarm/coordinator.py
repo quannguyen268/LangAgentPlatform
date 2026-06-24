@@ -2,8 +2,10 @@
 
 ``Swarm.launch`` takes a validated ``TeamTemplate``, spawns each declared
 agent via a ``Spawner``, registers the agent + task in the ``SubAgentRegistry``,
-and registers a ``HarnessRunner`` for the team. Callers drive phase
-advancement explicitly; ``Swarm`` does not advance phases itself in Phase 2A.
+and registers a ``HarnessRunner`` for the team. Phased templates activate
+only the first phase's agents at launch; the ``SwarmDriver`` advances phases
+and calls ``activate_phase`` to spawn each later phase's agents. Legacy
+(non-phased) templates still spawn all of their agents at launch.
 
 Launch is transactional: if any ``spawner.spawn`` call raises mid-loop,
 the agents already registered for this team are cancelled and deregistered
@@ -87,7 +89,8 @@ class Swarm:
         self._team_agents[team_id].append(agent_id)
         logger.info(
             "Spawned team member %s (agent_id=%s, role=%s, phase=%s)",
-            agent_tpl.name, agent_id, agent_tpl.role, agent_tpl.phase,
+            agent_tpl.name, agent_id, agent_tpl.role,
+            agent_tpl.phase or "unphased",
         )
         return agent_id
 
@@ -167,11 +170,12 @@ class Swarm:
     async def activate_phase(self, team_id: str, phase: str) -> list[str]:
         """Spawn the agents declared for ``phase``. Returns their agent_ids.
 
-        Returns [] for an unknown team or a phase with no declared agents.
+        Returns [] for a phase with no declared agents. Raises ``ValueError``
+        for an unknown ``team_id`` (a programming error).
         """
         template = self._team_templates.get(team_id)
         if template is None:
-            return []
+            raise ValueError(f"activate_phase: unknown team_id {team_id!r}")
         goal = self._team_goals.get(team_id, template.goal)
         new_ids: list[str] = []
         for agent_tpl in template.agents_for_phase(phase):
@@ -184,8 +188,12 @@ class Swarm:
         return new_ids
 
     def get_approvals(self, team_id: str) -> set[str]:
-        """The mutable approvals set for a team (consumed by HumanApprovalGate)."""
-        return self._team_approvals.setdefault(team_id, set())
+        """The mutable approvals set for a team (consumed by HumanApprovalGate).
+
+        Returns the team's stored set (mutations persist); a throwaway empty set
+        for an unknown team (no dangling entry).
+        """
+        return self._team_approvals.get(team_id, set())
 
     async def _rollback(self, spawned_ids: list[str]) -> None:
         """Cancel + deregister every agent registered so far for a failed launch."""
