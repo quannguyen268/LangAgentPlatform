@@ -40,6 +40,9 @@ class HarnessContext:
     workspace: str
     registry: Optional[SubAgentRegistry]
     approvals: set[str] = field(default_factory=set)
+    agent_ids: Optional[set[str]] = None
+    """When set, gates scope their checks to only these agent_ids (one team).
+    None preserves the legacy 'all registered agents' behavior."""
 
 
 class PhaseGate(ABC):
@@ -95,6 +98,8 @@ class AllTasksCompleteGate(PhaseGate):
         if ctx.registry is None:
             return GateResult(False, "AllTasksCompleteGate: no registry attached")
         agents = ctx.registry.list_agents()
+        if ctx.agent_ids is not None:
+            agents = [a for a in agents if a.agent_id in ctx.agent_ids]
         if not agents:
             return GateResult(True, "No agents registered")
 

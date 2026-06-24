@@ -15,6 +15,7 @@ from ..core.streaming import (
     agent_progress_event,
     agent_complete_event,
     agent_failed_event,
+    team_phase_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,3 +60,7 @@ class EventBroadcaster:
 
     def agent_failed(self, agent_id: str, reason: str, action: str, user_id: str = "") -> None:
         self._emit(agent_failed_event(agent_id=agent_id, reason=reason, action=action, user_id=user_id))
+
+    def team_phase(self, team_id: str, phase: str, status: str) -> None:
+        """status: 'active' (phase agents spawned) | 'complete' (team finished)."""
+        self._emit(team_phase_event(team_id=team_id, phase=phase, status=status))

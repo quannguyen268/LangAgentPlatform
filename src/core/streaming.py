@@ -20,6 +20,7 @@ class EventType:
     COST_UPDATE = "cost_update"
     ERROR = "error"
     DONE = "done"
+    TEAM_PHASE = "team_phase"
 
 
 @dataclass
@@ -111,3 +112,7 @@ def agent_failed_event(
         agent_id=agent_id,
         user_id=user_id,
     )
+
+
+def team_phase_event(team_id: str, phase: str, status: str, user_id: str = "", agent_id: str = "master") -> StreamEvent:
+    return StreamEvent(type=EventType.TEAM_PHASE, data={"team_id": team_id, "phase": phase, "status": status}, agent_id=agent_id, user_id=user_id)
