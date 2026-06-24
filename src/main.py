@@ -19,6 +19,14 @@ from .channels.api import APIChannel
 logger = logging.getLogger(__name__)
 
 
+async def _run_swarm_driver_once(driver) -> None:
+    """One swarm-driver tick, error-isolated so the loop survives failures."""
+    try:
+        await driver.tick()
+    except Exception as e:
+        logger.error("Swarm driver error: %s", e)
+
+
 async def main() -> None:
     # Load config
     config = load_config()
@@ -177,6 +185,26 @@ async def main() -> None:
         logger.info("Health monitor started (interval: %.1fs)",
                     config.subagent.health_check_interval)
 
+    # Swarm driver (background task advancing phased teams)
+    swarm_task = None
+    if config.swarm.enabled and bundle.swarm is not None and bundle.subagent_registry is not None:
+        from .swarm.driver import SwarmDriver
+        swarm_driver = SwarmDriver(
+            swarm=bundle.swarm,
+            registry=bundle.subagent_registry,
+            broadcaster=bundle.broadcaster,
+            workspace=config.swarm.workspace,
+        )
+
+        async def swarm_loop():
+            interval = getattr(config.swarm, "poll_interval", 5.0)
+            while True:
+                await asyncio.sleep(interval)
+                await _run_swarm_driver_once(swarm_driver)
+
+        swarm_task = asyncio.create_task(swarm_loop())
+        logger.info("Swarm driver started")
+
     # Dream process (periodic memory reflection)
     dream_task = None
     if config.dream.enabled:
@@ -228,6 +256,12 @@ async def main() -> None:
         health_task.cancel()
         try:
             await health_task
+        except asyncio.CancelledError:
+            pass
+    if swarm_task:
+        swarm_task.cancel()
+        try:
+            await swarm_task
         except asyncio.CancelledError:
             pass
     # Deregister all sub-agents so their tasks don't leak as orphan coroutines

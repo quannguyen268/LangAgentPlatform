@@ -297,6 +297,7 @@ class SwarmConfig(BaseModel):
     enabled: bool = False
     templates_dir: str = "templates"
     workspace: str = "./workspace"
+    poll_interval: float = 5.0
 
 
 class AppConfig(BaseModel):
