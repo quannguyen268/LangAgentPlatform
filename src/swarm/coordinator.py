@@ -212,6 +212,11 @@ class Swarm:
         """Return the agent_ids launched for a given team_id, or [] if unknown."""
         return list(self._team_agents.get(team_id, []))
 
+    def is_team_phased(self, team_id: str) -> bool:
+        """True if the team was launched from a phased template (driver-managed)."""
+        tmpl = self._team_templates.get(team_id)
+        return bool(tmpl and tmpl.is_phased)
+
     def iter_teams(self):
         """Iterate over ``(team_id, HarnessRunner)`` pairs.
 

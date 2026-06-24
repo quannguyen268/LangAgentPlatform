@@ -10,11 +10,14 @@ stall the others.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
 from ..subagent.broadcaster import EventBroadcaster
 from ..subagent.registry import SubAgentRegistry
 from .phases import HarnessContext
+
+if TYPE_CHECKING:
+    from .coordinator import Swarm
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +27,7 @@ class SwarmDriver:
 
     def __init__(
         self,
-        swarm: Any,
+        swarm: "Swarm",
         registry: SubAgentRegistry,
         broadcaster: EventBroadcaster,
         workspace: str,
@@ -34,6 +37,7 @@ class SwarmDriver:
         self._broadcaster = broadcaster
         self._workspace = workspace
         self._completed: set[str] = set()
+        self._errored: set[str] = set()
 
     async def tick(self) -> None:
         """Advance every team one step where its current phase's gate allows."""
@@ -44,6 +48,12 @@ class SwarmDriver:
                 logger.error("SwarmDriver: team %s tick failed: %s", team_id, e)
 
     async def _tick_team(self, team_id: str, runner) -> None:
+        if team_id in self._errored:
+            return
+        # Legacy (non-phased) teams are not driver-managed: their agents are all
+        # spawned at launch and the harness is not auto-advanced.
+        if not self._swarm.is_team_phased(team_id):
+            return
         if runner.is_finished:
             self._mark_complete(team_id)
             return
@@ -57,13 +67,21 @@ class SwarmDriver:
         advanced = await runner.try_advance(ctx)
         if not advanced:
             return
-
         if runner.is_finished:
             self._mark_complete(team_id)
             return
 
         new_phase = runner.current_phase
-        await self._swarm.activate_phase(team_id, new_phase)
+        try:
+            await self._swarm.activate_phase(team_id, new_phase)
+        except Exception as e:
+            # Activation failed AFTER the harness advanced — park the team rather
+            # than letting the next tick silently skip the unstaffed phase.
+            self._errored.add(team_id)
+            self._broadcaster.team_phase(team_id, phase=new_phase, status="error")
+            logger.error("Team %s: activating phase %s failed; parking team: %s",
+                         team_id, new_phase, e)
+            return
         self._broadcaster.team_phase(team_id, phase=new_phase, status="active")
 
     def _mark_complete(self, team_id: str) -> None:

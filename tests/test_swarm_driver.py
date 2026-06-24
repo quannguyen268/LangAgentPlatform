@@ -144,3 +144,75 @@ async def test_all_tasks_complete_gate_scopes_to_agent_ids():
     assert (await gate.check(HarnessContext(workspace="/tmp", registry=registry, agent_ids={"a"}))).passed is True
     # Unscoped (legacy) -> blocks because b is unfinished
     assert (await gate.check(HarnessContext(workspace="/tmp", registry=registry))).passed is False
+
+
+@pytest.mark.asyncio
+async def test_driver_ignores_legacy_team():
+    """A non-phased team is not advanced or touched by the driver."""
+    registry = SubAgentRegistry(InMemoryStore())
+    spawner = _FakeSpawner()
+    swarm = Swarm(registry=registry, broadcaster=EventBroadcaster(None),
+                  spawner=spawner, workspace="/tmp/ws")
+    driver = SwarmDriver(swarm=swarm, registry=registry,
+                         broadcaster=EventBroadcaster(None), workspace="/tmp/ws")
+    tmpl = TeamTemplate(name="t", goal="g", phases=["plan", "execute"],
+                        agents=[AgentTemplate(name="a", role="executor", tier="standard",
+                                              task_prompt="x", tools=[], skills=[])])
+    team_id = await swarm.launch(tmpl)            # legacy (no phase)
+    before = len(spawner.spawned)
+    await driver.tick()
+    assert swarm.get_harness(team_id).current_phase == "plan"   # untouched
+    assert len(spawner.spawned) == before                        # no activation
+
+
+@pytest.mark.asyncio
+async def test_driver_parks_team_on_activation_failure():
+    """If activating the next phase fails, the team parks instead of skipping ahead."""
+    class _FlakySpawner:
+        def __init__(self, fail_after):
+            self.n = 0; self.fail_after = fail_after
+        async def spawn(self, info, recovery_context=None):
+            self.n += 1
+            if self.n > self.fail_after:
+                raise RuntimeError("spawn failed")
+            return asyncio.create_task(asyncio.sleep(0))
+
+    registry = SubAgentRegistry(InMemoryStore())
+    spawner = _FlakySpawner(fail_after=1)   # phase[0] ok, phase[1] activation fails
+    swarm = Swarm(registry=registry, broadcaster=EventBroadcaster(None),
+                  spawner=spawner, workspace="/tmp/ws")
+    driver = SwarmDriver(swarm=swarm, registry=registry,
+                         broadcaster=EventBroadcaster(None), workspace="/tmp/ws")
+    team_id = await swarm.launch(_phased_template())
+    _finish(registry, swarm.get_team_agents(team_id))   # finish plan
+    await driver.tick()                                  # advance -> activate execute -> FAILS
+
+    assert team_id in driver._errored
+    # Parked at execute, not silently skipped to verify/finished on the next tick.
+    await driver.tick()
+    assert swarm.get_harness(team_id).is_finished is False
+
+
+@pytest.mark.asyncio
+async def test_driver_complete_is_idempotent():
+    """Ticking again after completion emits no second complete event and re-spawns nothing."""
+    from src.api.websocket import EventHub
+    registry = SubAgentRegistry(InMemoryStore())
+    spawner = _FakeSpawner()
+    hub = EventHub(); bc = EventBroadcaster(hub)
+    swarm = Swarm(registry=registry, broadcaster=bc, spawner=spawner, workspace="/tmp/ws")
+    driver = SwarmDriver(swarm=swarm, registry=registry, broadcaster=bc, workspace="/tmp/ws")
+    team_id = await swarm.launch(_phased_template())
+    _finish(registry, swarm.get_team_agents(team_id)); await driver.tick()   # -> execute
+    _finish(registry, swarm.get_team_agents(team_id)); await driver.tick()    # -> finished
+
+    events = []
+    async def sub():
+        async for ev in hub.subscribe():
+            events.append(ev)
+    sub_task = asyncio.create_task(sub()); await asyncio.sleep(0.05)
+    spawned_before = len(spawner.spawned)
+    await driver.tick(); await driver.tick()          # extra ticks after completion
+    await asyncio.sleep(0.05); sub_task.cancel()
+    assert len(spawner.spawned) == spawned_before     # no re-spawn
+    assert not [e for e in events if e.type == "team_phase" and e.data.get("status") == "complete"]
