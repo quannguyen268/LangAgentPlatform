@@ -12,6 +12,16 @@ from src.subagent.spawner import DeepAgentsSpawner
 from src.subagent.state import AgentInfo, SubAgentState
 
 
+def _ai_with_usage(text, model="claude-sonnet-4-6", in_tok=100, out_tok=50):
+    """An AIMessage carrying usage_metadata + response_metadata model name."""
+    return AIMessage(
+        content=text,
+        usage_metadata={"input_tokens": in_tok, "output_tokens": out_tok,
+                        "total_tokens": in_tok + out_tok},
+        response_metadata={"model_name": model},
+    )
+
+
 def _astream_factory(chunks, captured=None):
     """Return a fake ``astream(state, **kwargs)`` yielding the given chunks.
 
@@ -745,3 +755,138 @@ async def test_change_tier_directive_applies_live(monkeypatch):
     assert seen_tiers[0] == "standard"   # initial
     assert seen_tiers[1] == "expert"     # changed after first chunk's directive check
     assert await registry.agent_store.read_directive("a1") is None  # consumed
+
+
+@pytest.mark.asyncio
+async def test_streaming_records_cost_per_step(monkeypatch):
+    """Each AIMessage with usage_metadata accrues real cost on the agent + tracker."""
+    from src.observability.cost import CostTracker
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+    cost_tracker = CostTracker()
+
+    inner = MagicMock()
+    inner.astream = _astream_factory([
+        {"messages": [_ai_with_usage("step1")]},
+        {"messages": [_ai_with_usage("step1"), _ai_with_usage("step2")]},
+    ])
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+        cost_tracker=cost_tracker,
+    )
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    # claude-sonnet-4-6 = (300, 1500) cents per 1M. Each step:
+    #   (100*300 + 50*1500)/1e6 = 0.105 cents; two steps -> 0.21
+    assert registry.get_agent("a1").cost_cents == pytest.approx(0.21, rel=1e-3)
+    by_agent = cost_tracker.by_agent()
+    assert by_agent["a1"]["total_tokens"] == 300        # 150 * 2
+    assert by_agent["a1"]["calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_streaming_cost_not_double_counted(monkeypatch):
+    """An AIMessage that reappears in later cumulative snapshots is costed once."""
+    from src.observability.cost import CostTracker
+    from langchain_core.messages import ToolMessage
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+    cost_tracker = CostTracker()
+
+    ai1 = _ai_with_usage("a1msg")
+    inner = MagicMock()
+    inner.astream = _astream_factory([
+        {"messages": [ai1]},
+        {"messages": [ai1, ToolMessage(content="tool out", tool_call_id="x")]},
+    ])
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+        cost_tracker=cost_tracker,
+    )
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert cost_tracker.by_agent()["a1"]["calls"] == 1
+    assert registry.get_agent("a1").cost_cents == pytest.approx(0.105, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_streaming_no_cost_tracker_is_safe(monkeypatch):
+    """With no cost tracker, the loop runs fine and cost stays 0."""
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+
+    inner = MagicMock()
+    inner.astream = _astream_factory([{"messages": [_ai_with_usage("x")]}])
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+    )  # no cost_tracker
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert registry.get_agent("a1").cost_cents == 0.0
+
+
+@pytest.mark.asyncio
+async def test_agent_progress_event_carries_real_cost(monkeypatch):
+    """agent_progress events report the accumulated cost_cents."""
+    from src.observability.cost import CostTracker
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    hub = EventHub()
+    broadcaster = EventBroadcaster(hub)
+    cost_tracker = CostTracker()
+
+    events = []
+    async def sub():
+        async for ev in hub.subscribe():
+            events.append(ev)
+            if ev.type == "agent_complete":
+                break
+    sub_task = asyncio.create_task(sub())
+    await asyncio.sleep(0.05)
+
+    inner = MagicMock()
+    inner.astream = _astream_factory([{"messages": [_ai_with_usage("step1")]}])
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+        cost_tracker=cost_tracker,
+    )
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+    await asyncio.wait_for(sub_task, timeout=2.0)
+
+    progress = [e for e in events if e.type == "agent_progress"]
+    assert progress and progress[-1].data["cost_cents"] == pytest.approx(0.105, rel=1e-3)

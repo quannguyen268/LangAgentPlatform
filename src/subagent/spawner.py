@@ -62,6 +62,7 @@ class DeepAgentsSpawner:
         streaming: bool = True,
         workspace: str | None = None,
         skills_dirs: list[str] | None = None,
+        cost_tracker: Any = None,
     ):
         self._registry = registry
         self._broadcaster = broadcaster
@@ -70,6 +71,7 @@ class DeepAgentsSpawner:
         self._streaming = streaming
         self._workspace = workspace
         self._skills_dirs = skills_dirs
+        self._cost_tracker = cost_tracker
 
     def _build_inner(self, info: AgentInfo) -> Any:
         """Construct the inner DeepAgents instance for this agent's current config.
@@ -98,6 +100,34 @@ class DeepAgentsSpawner:
         if not info.skills:
             return None
         return f"Prioritize these skills for this work: {', '.join(info.skills)}."
+
+    def _record_costs(self, info: AgentInfo, new_messages: list) -> None:
+        """Record usage for any newly produced AIMessages, accruing info.cost_cents.
+
+        Token counts come from ``usage_metadata``; the cents are computed by the
+        CostTracker from the message's model name (0.0 if the model is not in the
+        pricing table). No-op when no cost tracker is wired.
+        """
+        if self._cost_tracker is None:
+            return
+        for m in new_messages:
+            if not isinstance(m, AIMessage):
+                continue
+            usage = getattr(m, "usage_metadata", None)
+            if not usage:
+                continue
+            meta = m.response_metadata or {}
+            model = meta.get("model_name") or meta.get("model") or ""
+            cost = self._cost_tracker.record(
+                provider="",
+                model=model,
+                prompt_tokens=usage.get("input_tokens", 0) or 0,
+                completion_tokens=usage.get("output_tokens", 0) or 0,
+                user_id="subagent",   # spawning user id not threaded yet (future work)
+                tier=info.tier,
+                agent_id=info.agent_id,
+            )
+            info.cost_cents += cost
 
     async def spawn(self, info: AgentInfo, recovery_context: Optional[str] = None) -> asyncio.Task:
         """Create the asyncio.Task that runs this sub-agent."""
@@ -236,19 +266,35 @@ class DeepAgentsSpawner:
         final_state = state
         stopped = False
         saw_step = False
+        counted = 0
+        costed_ids: set[int] = set()
 
         async with aclosing(inner.astream(state, stream_mode="values")) as stream:
             first = True
             async for chunk in stream:
                 final_state = chunk
+                msgs = chunk.get("messages", [])
                 if first:
                     # stream_mode="values" echoes the input state first — not a step.
+                    # Everything already present (prior segment messages) was costed
+                    # before; mark them all so they won't be re-costed.
                     first = False
+                    costed_ids = {id(m) for m in msgs}
+                    # counted stays 0: in real LangGraph streams the cumulative
+                    # snapshots include the original messages, so the identity
+                    # guard above is sufficient to skip them.  In unit tests the
+                    # fake chunks start at index 0, so we must not advance
+                    # counted here either.
                     continue
                 saw_step = True
+                new_msgs = [m for m in msgs[counted:] if id(m) not in costed_ids]
+                self._record_costs(info, new_msgs)
+                for m in new_msgs:
+                    costed_ids.add(id(m))
+                counted = len(msgs)
                 self._registry.increment_iteration(agent_id)
                 iteration = self._registry.get_agent(agent_id).iteration
-                preview = _extract_last_text(chunk.get("messages", []))[:_PROGRESS_PREVIEW_CHARS]
+                preview = _extract_last_text(msgs)[:_PROGRESS_PREVIEW_CHARS]
 
                 await store.write_heartbeat(agent_id, iteration=iteration, status="running")
                 await store.write_progress(agent_id, message=preview, cost=info.cost_cents)
