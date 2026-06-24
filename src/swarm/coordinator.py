@@ -11,9 +11,11 @@ Launch is transactional: if any ``spawner.spawn`` call raises mid-loop,
 the agents already registered for this team are cancelled and deregistered
 before the exception propagates. The caller never sees a half-launched team.
 
-``workspace`` and ``broadcaster`` are held on the instance for upcoming
-wiring (broadcaster → lifecycle events, workspace → HarnessContext) and
-are not yet read by Swarm itself.
+Phase-lifecycle event emission and ``HarnessContext`` construction are owned
+by the ``SwarmDriver`` (which carries its own broadcaster + workspace, the same
+values passed here from ``create_agent``). Swarm retains ``broadcaster`` and
+``workspace`` for construction symmetry and possible direct use; Swarm itself
+does not currently read them.
 """
 from __future__ import annotations
 
@@ -51,9 +53,9 @@ class Swarm:
         workspace: str,
     ):
         self._registry = registry
-        self._broadcaster = broadcaster  # T13: lifecycle event emission
+        self._broadcaster = broadcaster  # retained for symmetry; driver emits events
         self._spawner = spawner
-        self._workspace = workspace  # T13: fed into HarnessContext at run time
+        self._workspace = workspace  # retained for symmetry; driver builds HarnessContext
         self._teams: dict[str, HarnessRunner] = {}
         self._team_agents: dict[str, list[str]] = {}
         self._team_templates: dict[str, TeamTemplate] = {}
@@ -172,6 +174,11 @@ class Swarm:
 
         Returns [] for a phase with no declared agents. Raises ``ValueError``
         for an unknown ``team_id`` (a programming error).
+
+        Unlike ``launch``, this does NOT roll back on a mid-loop spawn failure:
+        agents spawned before the failure stay registered. The ``SwarmDriver``
+        catches the exception and parks the team (fail-closed), and the orphaned
+        agents are reaped by ``registry.shutdown_all()`` at shutdown.
         """
         template = self._team_templates.get(team_id)
         if template is None:
