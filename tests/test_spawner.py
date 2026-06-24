@@ -890,3 +890,40 @@ async def test_agent_progress_event_carries_real_cost(monkeypatch):
 
     progress = [e for e in events if e.type == "agent_progress"]
     assert progress and progress[-1].data["cost_cents"] == pytest.approx(0.105, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_cost_not_recounted_across_segments(monkeypatch):
+    """A segment-1 AIMessage carried into segment 2 is not re-costed."""
+    from src.observability.cost import CostTracker
+    store = InMemoryStore()
+    registry = SubAgentRegistry(store)
+    broadcaster = EventBroadcaster(None)
+    cost_tracker = CostTracker()
+
+    inner = MagicMock()
+    # Each segment is a list of stream chunks ({"messages": [...]}); one chunk each.
+    inner.astream = _astream_segments([
+        [{"messages": [_ai_with_usage("seg1")]}],   # segment 1 produces AI1
+        [{"messages": [_ai_with_usage("seg2")]}],   # segment 2 produces AI2
+    ])
+    monkeypatch.setattr("src.subagent.spawner.create_deep_agent", lambda **kw: inner)
+
+    spawner = DeepAgentsSpawner(
+        registry=registry, broadcaster=broadcaster,
+        base_model=MagicMock(), tools_by_name={}, streaming=True,
+        cost_tracker=cost_tracker,
+    )
+    info = AgentInfo(agent_id="a1", name="n", role="executor", task="t",
+                     tier="standard", tools=[], skills=[])
+    registry.register(info, asyncio.create_task(asyncio.sleep(0)))
+    # Queue a follow-up so a SECOND segment runs (carrying segment 1's messages).
+    await registry.agent_store.send_inbox("a1", sender="master", message="more")
+
+    task = await spawner.spawn(info)
+    registry._tasks["a1"] = task
+    await asyncio.wait_for(task, timeout=5.0)
+
+    # Each of the two AIMessages costed exactly once: 0.105 * 2 = 0.21, calls=2.
+    assert cost_tracker.by_agent()["a1"]["calls"] == 2
+    assert registry.get_agent("a1").cost_cents == pytest.approx(0.21, rel=1e-3)

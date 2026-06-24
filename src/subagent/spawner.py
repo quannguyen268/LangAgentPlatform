@@ -127,6 +127,10 @@ class DeepAgentsSpawner:
                 tier=info.tier,
                 agent_id=info.agent_id,
             )
+            if cost == 0.0 and model:
+                logger.debug(
+                    "_record_costs: no pricing for model %r; tokens counted, cost=0", model
+                )
             info.cost_cents += cost
 
     async def spawn(self, info: AgentInfo, recovery_context: Optional[str] = None) -> asyncio.Task:
@@ -276,15 +280,13 @@ class DeepAgentsSpawner:
                 msgs = chunk.get("messages", [])
                 if first:
                     # stream_mode="values" echoes the input state first — not a step.
-                    # Everything already present (prior segment messages) was costed
-                    # before; mark them all so they won't be re-costed.
+                    # Seed costed_ids with every already-present message so prior-step
+                    # AND prior-segment (carried-forward) messages are never re-costed.
+                    # id()-identity is stable because langgraph's add_messages reuses
+                    # prior message OBJECTS across cumulative snapshots; the carried-
+                    # forward list reuses the same objects across segments too.
                     first = False
                     costed_ids = {id(m) for m in msgs}
-                    # counted stays 0: in real LangGraph streams the cumulative
-                    # snapshots include the original messages, so the identity
-                    # guard above is sufficient to skip them.  In unit tests the
-                    # fake chunks start at index 0, so we must not advance
-                    # counted here either.
                     continue
                 saw_step = True
                 new_msgs = [m for m in msgs[counted:] if id(m) not in costed_ids]
