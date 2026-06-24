@@ -197,7 +197,7 @@ async def main() -> None:
         )
 
         async def swarm_loop():
-            interval = getattr(config.swarm, "poll_interval", 5.0)
+            interval = config.swarm.poll_interval
             while True:
                 await asyncio.sleep(interval)
                 await _run_swarm_driver_once(swarm_driver)
