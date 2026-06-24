@@ -193,3 +193,41 @@ async def test_ws2_known_tools_excludes_orchestration_tools(monkeypatch, tmp_pat
         "known_tools must exclude orchestration tools — snapshot must precede "
         "custom_tools.extend()"
     )
+
+
+# ---------------------------------------------------------------------------
+# WS3 Task 2 — CostTracker wired into DeepAgentsSpawner
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ws3_spawner_receives_cost_tracker(monkeypatch, tmp_path):
+    """create_agent passes the shared CostTracker into the spawner."""
+    from unittest.mock import MagicMock
+    import src.agent as agent_mod
+    import src.subagent.spawner as spawner_mod
+    from src.config import AppConfig
+
+    monkeypatch.setattr(agent_mod, "init_chat_model", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(agent_mod, "create_deep_agent", lambda **k: MagicMock())
+    # Middleware build needs a cheap model under default config — stub it out
+    # (orthogonal to this wiring assertion).
+    monkeypatch.setattr(agent_mod, "_build_middleware", lambda config: [])
+
+    captured = {}
+    real_init = spawner_mod.DeepAgentsSpawner.__init__
+    def capturing_init(self, *args, **kwargs):
+        captured["cost_tracker"] = kwargs.get("cost_tracker")
+        real_init(self, *args, **kwargs)
+    monkeypatch.setattr(spawner_mod.DeepAgentsSpawner, "__init__", capturing_init)
+
+    cfg = AppConfig()
+    cfg.agent.workspace = str(tmp_path / "ws")
+    cfg.agent.data_dir = str(tmp_path / "data")
+    cfg.subagent.enabled = True
+    cfg.swarm.enabled = False
+    cfg.model_router.enabled = False
+
+    bundle = await agent_mod.create_agent(cfg)
+
+    assert captured["cost_tracker"] is not None
+    assert captured["cost_tracker"] is bundle.cost_tracker

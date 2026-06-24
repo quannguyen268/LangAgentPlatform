@@ -324,6 +324,7 @@ async def create_agent(config: AppConfig) -> "PlatformBundle":
             streaming=config.subagent.streaming,
             workspace=workspace,
             skills_dirs=skills_dirs if skills_dirs else None,
+            cost_tracker=cost_tracker,
         )
         recovery_executor = RecoveryExecutor(
             registry=subagent_registry,
