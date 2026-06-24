@@ -192,3 +192,48 @@ task_prompt = "x"
 def test_load_builtin_raises_on_unknown_name():
     with pytest.raises(FileNotFoundError):
         load_builtin("does-not-exist")
+
+
+# ---------------------------------------------------------------------------
+# Phase field tests (WS4 Task 1)
+# ---------------------------------------------------------------------------
+from pydantic import ValidationError
+from src.swarm.templates import AgentTemplate
+
+
+def _agent(name, phase=None):
+    return {"name": name, "role": "executor", "tier": "standard",
+            "task_prompt": "do x", "tools": [], "skills": [],
+            **({"phase": phase} if phase is not None else {})}
+
+
+def test_agent_template_phase_defaults_none():
+    a = AgentTemplate(**_agent("a"))
+    assert a.phase is None
+
+
+def test_team_is_phased_true_when_any_agent_has_phase():
+    t = TeamTemplate(name="t", goal="g", phases=["plan", "execute"],
+                     agents=[AgentTemplate(**_agent("a", "plan"))])
+    assert t.is_phased is True
+
+
+def test_team_is_phased_false_when_no_phases():
+    t = TeamTemplate(name="t", goal="g", phases=["plan", "execute"],
+                     agents=[AgentTemplate(**_agent("a"))])
+    assert t.is_phased is False
+
+
+def test_agents_for_phase_filters():
+    t = TeamTemplate(name="t", goal="g", phases=["plan", "execute"],
+                     agents=[AgentTemplate(**_agent("a", "plan")),
+                             AgentTemplate(**_agent("b", "execute")),
+                             AgentTemplate(**_agent("c", "plan"))])
+    assert [a.name for a in t.agents_for_phase("plan")] == ["a", "c"]
+    assert [a.name for a in t.agents_for_phase("execute")] == ["b"]
+
+
+def test_unknown_agent_phase_rejected():
+    with pytest.raises(ValidationError):
+        TeamTemplate(name="t", goal="g", phases=["plan", "execute"],
+                     agents=[AgentTemplate(**_agent("a", "bogus"))])

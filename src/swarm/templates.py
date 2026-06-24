@@ -12,7 +12,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 
 class AgentTemplate(BaseModel):
@@ -22,6 +22,15 @@ class AgentTemplate(BaseModel):
     tools: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
     task_prompt: str = Field(min_length=1)
+    phase: Optional[str] = None
+
+    @field_validator("phase")
+    @classmethod
+    def _strip_phase(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v2 = v.strip()
+        return v2 or None
 
     @field_validator("name", "role", "task_prompt")
     @classmethod
@@ -59,6 +68,26 @@ class TeamTemplate(BaseModel):
         if dupes:
             raise ValueError(f"agent names must be unique; duplicates: {sorted(dupes)}")
         return v
+
+    @model_validator(mode="after")
+    def _validate_agent_phases(self) -> "TeamTemplate":
+        known = set(self.phases)
+        for a in self.agents:
+            if a.phase is not None and a.phase not in known:
+                raise ValueError(
+                    f"agent {a.name!r} references unknown phase {a.phase!r}; "
+                    f"known phases: {self.phases}"
+                )
+        return self
+
+    @property
+    def is_phased(self) -> bool:
+        """True iff any agent is bound to a phase (enables phased activation)."""
+        return any(a.phase is not None for a in self.agents)
+
+    def agents_for_phase(self, phase: str) -> list["AgentTemplate"]:
+        """Agents declared for a given phase (order-preserving)."""
+        return [a for a in self.agents if a.phase == phase]
 
 
 def load_template(
