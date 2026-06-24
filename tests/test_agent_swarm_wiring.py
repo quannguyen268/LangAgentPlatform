@@ -202,6 +202,7 @@ async def test_ws2_known_tools_excludes_orchestration_tools(monkeypatch, tmp_pat
 @pytest.mark.asyncio
 async def test_ws3_spawner_receives_cost_tracker(monkeypatch, tmp_path):
     """create_agent passes the shared CostTracker into the spawner."""
+    ensure_real_deepagents()
     from unittest.mock import MagicMock
     import src.agent as agent_mod
     import src.subagent.spawner as spawner_mod
@@ -216,8 +217,8 @@ async def test_ws3_spawner_receives_cost_tracker(monkeypatch, tmp_path):
     captured = {}
     real_init = spawner_mod.DeepAgentsSpawner.__init__
     def capturing_init(self, *args, **kwargs):
-        captured["cost_tracker"] = kwargs.get("cost_tracker")
         real_init(self, *args, **kwargs)
+        captured["spawner"] = self
     monkeypatch.setattr(spawner_mod.DeepAgentsSpawner, "__init__", capturing_init)
 
     cfg = AppConfig()
@@ -229,5 +230,5 @@ async def test_ws3_spawner_receives_cost_tracker(monkeypatch, tmp_path):
 
     bundle = await agent_mod.create_agent(cfg)
 
-    assert captured["cost_tracker"] is not None
-    assert captured["cost_tracker"] is bundle.cost_tracker
+    assert captured["spawner"]._cost_tracker is not None
+    assert captured["spawner"]._cost_tracker is bundle.cost_tracker
