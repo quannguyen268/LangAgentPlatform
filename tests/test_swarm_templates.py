@@ -1,7 +1,8 @@
 """Test TOML team template loader."""
 import pytest
 from pathlib import Path
-from src.swarm.templates import TeamTemplate, load_builtin, load_template
+from pydantic import ValidationError
+from src.swarm.templates import AgentTemplate, TeamTemplate, load_builtin, load_template
 
 
 def _write(path: Path, body: str) -> Path:
@@ -197,10 +198,6 @@ def test_load_builtin_raises_on_unknown_name():
 # ---------------------------------------------------------------------------
 # Phase field tests (WS4 Task 1)
 # ---------------------------------------------------------------------------
-from pydantic import ValidationError
-from src.swarm.templates import AgentTemplate
-
-
 def _agent(name, phase=None):
     return {"name": name, "role": "executor", "tier": "standard",
             "task_prompt": "do x", "tools": [], "skills": [],
@@ -209,6 +206,12 @@ def _agent(name, phase=None):
 
 def test_agent_template_phase_defaults_none():
     a = AgentTemplate(**_agent("a"))
+    assert a.phase is None
+
+
+def test_agent_phase_blank_normalised_to_none():
+    a = AgentTemplate(name="a", role="executor", tier="standard",
+                      task_prompt="do x", phase="   ")
     assert a.phase is None
 
 
