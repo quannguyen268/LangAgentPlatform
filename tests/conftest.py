@@ -1,10 +1,29 @@
 """Shared test fixtures."""
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+def ensure_real_deepagents() -> None:
+    """Undo any sys.modules pollution of ``deepagents.*`` from earlier tests.
+
+    ``tests/test_backend.py`` installs ``MagicMock`` instances under the
+    ``deepagents`` namespace so it can run without the real package. Those
+    mocks survive in ``sys.modules`` for the rest of the pytest process and
+    break any later test that imports ``src.agent`` (which transitively
+    imports ``deepagents.middleware.skills``). Call this helper at the top
+    of any test that needs the real package — it drops only ``unittest.mock``
+    entries, leaving genuine modules untouched.
+    """
+    for name in list(sys.modules):
+        if name == "deepagents" or name.startswith("deepagents."):
+            mod = sys.modules[name]
+            if mod.__class__.__module__ == "unittest.mock":
+                del sys.modules[name]
 
 from src.config import (
     AgentConfig,
@@ -72,6 +91,7 @@ def reset_tool_globals():
     old_brave = web._brave_api_key
     old_timeout = web._fetch_timeout
     old_data_file = cron._data_file
+    old_tasks_lock = cron._tasks_lock
     old_host_client = host._gateway_client
     old_host_bridges = host._available_bridges
     old_host_timeout = host._default_timeout
@@ -89,6 +109,7 @@ def reset_tool_globals():
     web._brave_api_key = old_brave
     web._fetch_timeout = old_timeout
     cron._data_file = old_data_file
+    cron._tasks_lock = old_tasks_lock
     host._gateway_client = old_host_client
     host._available_bridges = old_host_bridges
     host._default_timeout = old_host_timeout

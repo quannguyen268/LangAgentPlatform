@@ -284,3 +284,169 @@ class TestCancelTask:
 
         result = await cancel_task.ainvoke({"task_id": "zzz"})
         assert "not found" in result
+
+
+# ---------------------------------------------------------------------------
+# TestListActiveTasksStructured — structured task listing for /v1/tasks endpoint
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cron_data_file(tmp_path, monkeypatch):
+    """Initialize cron tools with a tmp data file."""
+    from src.tools import cron
+
+    data_file = tmp_path / "tasks.json"
+    monkeypatch.setattr(cron, "_data_file", str(data_file))
+    monkeypatch.setattr(cron, "_tasks_lock", asyncio.Lock())
+    return data_file
+
+
+@pytest.mark.asyncio
+async def test_list_active_tasks_structured_returns_api_shape(cron_data_file):
+    """The structured listing must produce the keys the API endpoint promises."""
+    from src.tools.cron import list_active_tasks_structured
+
+    raw_tasks = [
+        {
+            "id": "abc12345",
+            "prompt": "Daily standup summary",
+            "type": "cron",
+            "value": "0 9 * * *",
+            "channel": "telegram",
+            "chat_id": "100",
+            "created_at": "2026-04-20T11:23:00+00:00",
+            "last_run": None,
+            "active": True,
+            "model_tier": "standard",
+        },
+        {
+            "id": "deadbeef",
+            "prompt": "old job",
+            "type": "interval",
+            "value": "60",
+            "channel": "cli",
+            "chat_id": None,
+            "created_at": "2026-04-20T11:00:00+00:00",
+            "last_run": "2026-04-21T11:00:00+00:00",
+            "active": False,  # MUST be excluded
+        },
+    ]
+    cron_data_file.write_text(json.dumps(raw_tasks))
+
+    out = await list_active_tasks_structured()
+    assert isinstance(out, list)
+    assert len(out) == 1  # Inactive is excluded
+    t = out[0]
+    # API-shape keys (matches spec §4.4)
+    assert t["task_id"] == "abc12345"
+    assert t["prompt"] == "Daily standup summary"
+    assert t["schedule_type"] == "cron"
+    assert t["schedule_value"] == "0 9 * * *"
+    assert t["model_tier"] == "standard"
+    assert t["created_at"] == "2026-04-20T11:23:00+00:00"
+    assert "next_run" in t  # ISO-8601 string or null
+
+
+@pytest.mark.asyncio
+async def test_list_active_tasks_structured_empty(cron_data_file):
+    from src.tools.cron import list_active_tasks_structured
+    out = await list_active_tasks_structured()
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_list_active_tasks_structured_handles_missing_optional_fields(cron_data_file):
+    """A task without model_tier or last_run must still serialize cleanly."""
+    from src.tools.cron import list_active_tasks_structured
+
+    raw = [{"id": "x1", "prompt": "p", "type": "once", "value": "2099-01-01T00:00:00",
+            "channel": None, "chat_id": None, "created_at": "2026-04-20T00:00:00+00:00",
+            "last_run": None, "active": True}]
+    cron_data_file.write_text(json.dumps(raw))
+
+    out = await list_active_tasks_structured()
+    assert len(out) == 1
+    assert out[0]["model_tier"] is None
+    assert out[0]["task_id"] == "x1"
+    assert out[0]["next_run"] is not None  # 'once' → use the value as next_run
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_tool_still_returns_string(cron_data_file):
+    """The existing @tool contract must keep working — it just consumes the structured data."""
+    from src.tools.cron import list_tasks
+
+    raw = [{"id": "abc12345", "prompt": "p", "type": "cron", "value": "* * * * *",
+            "channel": None, "chat_id": None, "created_at": "2026-04-20T00:00:00+00:00",
+            "last_run": None, "active": True}]
+    cron_data_file.write_text(json.dumps(raw))
+
+    result = await list_tasks.ainvoke({})
+    assert isinstance(result, str)
+    assert "abc12345" in result
+
+
+@pytest.mark.asyncio
+async def test_once_task_already_fired_returns_none_next_run(cron_data_file):
+    """A "once" task with last_run set is conceptually finished — next_run is None."""
+    from src.tools.cron import list_active_tasks_structured
+
+    raw = [
+        {
+            "id": "fired",
+            "prompt": "p",
+            "type": "once",
+            "value": "2026-04-20T00:00:00+00:00",
+            "channel": None,
+            "chat_id": None,
+            "created_at": "2026-04-19T00:00:00+00:00",
+            "last_run": "2026-04-20T00:00:01+00:00",  # already fired
+            "active": True,
+        },
+        {
+            "id": "pending",
+            "prompt": "p",
+            "type": "once",
+            "value": "2099-01-01T00:00:00+00:00",
+            "channel": None,
+            "chat_id": None,
+            "created_at": "2026-04-20T00:00:00+00:00",
+            "last_run": None,
+            "active": True,
+        },
+    ]
+    cron_data_file.write_text(json.dumps(raw))
+
+    out = await list_active_tasks_structured()
+    by_id = {t["task_id"]: t for t in out}
+    assert by_id["fired"]["next_run"] is None
+    assert by_id["pending"]["next_run"] == "2099-01-01T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_interval_task_next_run_is_utc_canonical(cron_data_file):
+    """Interval next_run must be UTC-canonical even when stored timestamps are naive."""
+    from src.tools.cron import list_active_tasks_structured
+
+    # Naive last_run (no TZ) — must be treated as UTC and emitted with TZ suffix.
+    raw = [{
+        "id": "iv1",
+        "prompt": "p",
+        "type": "interval",
+        "value": "60",
+        "channel": None,
+        "chat_id": None,
+        "created_at": "2026-04-20T00:00:00",  # naive
+        "last_run": "2026-04-20T12:00:00",   # naive
+        "active": True,
+    }]
+    cron_data_file.write_text(json.dumps(raw))
+
+    out = await list_active_tasks_structured()
+    nr = out[0]["next_run"]
+    assert nr is not None
+    # Either trailing 'Z' or '+00:00' marks a tz-aware UTC ISO string
+    assert nr.endswith("+00:00") or nr.endswith("Z"), (
+        f"Expected UTC-canonical ISO string, got {nr!r}"
+    )

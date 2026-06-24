@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import signal
+from pathlib import Path
 
 from .avatar import AvatarBridge
 from .gateway.bridges.claude_code import setup_bridge
@@ -16,6 +17,14 @@ from .channels.cli import CLIChannel
 from .channels.api import APIChannel
 
 logger = logging.getLogger(__name__)
+
+
+async def _run_swarm_driver_once(driver) -> None:
+    """One swarm-driver tick, error-isolated so the loop survives failures."""
+    try:
+        await driver.tick()
+    except Exception as e:
+        logger.error("Swarm driver error: %s", e)
 
 
 async def main() -> None:
@@ -35,7 +44,7 @@ async def main() -> None:
         init_middleware_bridges(config.gateway)
 
     # Create agent
-    agent, checkpointer, mcp_client = await create_agent(config)
+    bundle = await create_agent(config)
     logger.info("Agent ready")
 
     # Avatar emotion system (relays via gateway SSE)
@@ -50,7 +59,7 @@ async def main() -> None:
 
     # Router
     router = MessageRouter(
-        agent, config, checkpointer=checkpointer,
+        bundle.agent, config, checkpointer=bundle.checkpointer,
         pre_hook=pre_hook, post_hook=post_hook,
     )
 
@@ -82,8 +91,26 @@ async def main() -> None:
         logger.info("CLI channel configured")
 
     if config.channels.api.enabled:
+        from .api.websocket import EventHub
+
+        event_hub = EventHub()
+
+        # Attach the real hub to the sub-agent broadcaster so lifecycle
+        # events (spawn/progress/complete/failed) actually reach API clients.
+        if bundle.broadcaster is not None:
+            bundle.broadcaster.set_hub(event_hub)
+
         api_config = config.channels.api
-        api = APIChannel(host=api_config.host, port=api_config.port)
+        api = APIChannel(
+            host=api_config.host,
+            port=api_config.port,
+            workspace=config.agent.workspace,
+            cost_tracker=bundle.cost_tracker,
+            event_hub=event_hub,
+            subagent_registry=bundle.subagent_registry,
+            swarm=bundle.swarm,
+            config=config,
+        )
 
         async def api_callback(msg):
             return await router.handle_message(msg, api_config)
@@ -101,8 +128,111 @@ async def main() -> None:
     scheduler = None
     if config.scheduler.enabled:
         channels_map = {ch.name: ch for ch in channels}
-        scheduler = Scheduler(agent, config, channels=channels_map)
+        scheduler = Scheduler(bundle.agent, config, channels=channels_map)
         await scheduler.start()
+
+    # Health monitor (background task checking sub-agent heartbeats)
+    health_task = None
+    if config.subagent.enabled and bundle.subagent_registry is not None:
+        from .subagent.health import HealthMonitor
+        monitor = HealthMonitor(
+            registry=bundle.subagent_registry,
+            heartbeat_timeout=config.subagent.heartbeat_timeout,
+            task_timeout=config.subagent.task_timeout,
+            max_iterations=config.subagent.max_iterations,
+        )
+
+        async def health_loop():
+            interval = config.subagent.health_check_interval
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    # Pull fresh heartbeat + iteration from BaseStore so the
+                    # monitor sees what sub-agents have actually written.
+                    await bundle.subagent_registry.sync_from_store()
+                    unhealthy = monitor.check_all()
+                    if unhealthy:
+                        logger.warning("Unhealthy sub-agents: %s", unhealthy)
+                        if bundle.recovery_executor is None:
+                            logger.warning(
+                                "No recovery_executor wired; %d unhealthy agent(s) ignored",
+                                len(unhealthy),
+                            )
+                        else:
+                            # Run recoveries concurrently so a slow one doesn't
+                            # stall the rest of this tick or push the next tick.
+                            items = list(unhealthy.items())
+                            results = await asyncio.gather(
+                                *(
+                                    bundle.recovery_executor.handle_failure(
+                                        aid, reason=reason.value,
+                                    )
+                                    for aid, reason in items
+                                ),
+                                return_exceptions=True,
+                            )
+                            for (aid, _), res in zip(items, results):
+                                if isinstance(res, Exception):
+                                    logger.error(
+                                        "Recovery failed for %s: %s", aid, res,
+                                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error("Health monitor error: %s", e)
+
+        health_task = asyncio.create_task(health_loop())
+        logger.info("Health monitor started (interval: %.1fs)",
+                    config.subagent.health_check_interval)
+
+    # Swarm driver (background task advancing phased teams)
+    swarm_task = None
+    if config.swarm.enabled and bundle.swarm is not None and bundle.subagent_registry is not None:
+        from .swarm.driver import SwarmDriver
+        swarm_driver = SwarmDriver(
+            swarm=bundle.swarm,
+            registry=bundle.subagent_registry,
+            broadcaster=bundle.broadcaster,
+            workspace=config.swarm.workspace,
+        )
+
+        async def swarm_loop():
+            interval = config.swarm.poll_interval
+            while True:
+                await asyncio.sleep(interval)
+                await _run_swarm_driver_once(swarm_driver)
+
+        swarm_task = asyncio.create_task(swarm_loop())
+        logger.info("Swarm driver started")
+
+    # Dream process (periodic memory reflection)
+    dream_task = None
+    if config.dream.enabled:
+        from .memory.dream import DreamProcess
+        dream_proc = DreamProcess(
+            workspace=config.agent.workspace,
+            memory_dir=str(Path(config.agent.workspace, "memory")),
+            max_batch_size=config.dream.max_batch_size,
+            max_iterations=config.dream.max_iterations,
+        )
+
+        async def dream_loop():
+            interval = config.dream.interval_hours * 3600
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    from langchain.chat_models import init_chat_model
+                    dream_model_name = config.dream.model or f"{config.provider.name}:{config.provider.model}"
+                    dream_model = init_chat_model(dream_model_name)
+                    result = await dream_proc.run(model=dream_model)
+                    logger.info("Dream completed: %s", result)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error("Dream failed: %s", e)
+
+        dream_task = asyncio.create_task(dream_loop())
+        logger.info("Dream process enabled (interval: %.1fh)", config.dream.interval_hours)
 
     logger.info("LangAgent Platform is running. Press Ctrl+C to stop.")
 
@@ -122,18 +252,39 @@ async def main() -> None:
 
     # Cleanup
     logger.info("Shutting down...")
+    if health_task:
+        health_task.cancel()
+        try:
+            await health_task
+        except asyncio.CancelledError:
+            pass
+    if swarm_task:
+        swarm_task.cancel()
+        try:
+            await swarm_task
+        except asyncio.CancelledError:
+            pass
+    # Deregister all sub-agents so their tasks don't leak as orphan coroutines
+    if bundle.subagent_registry is not None:
+        await bundle.subagent_registry.shutdown_all()
+    if dream_task:
+        dream_task.cancel()
+        try:
+            await dream_task
+        except asyncio.CancelledError:
+            pass
     if scheduler:
         await scheduler.stop()
     for ch in channels:
         await ch.stop()
-    if mcp_client:
+    if bundle.mcp_client:
         try:
-            await mcp_client.close()
+            await bundle.mcp_client.close()
         except (OSError, RuntimeError):
             logger.debug("MCP client close failed (already closed or loop shutdown)")
-    if checkpointer:
+    if bundle.checkpointer:
         try:
-            await checkpointer.conn.close()
+            await bundle.checkpointer.conn.close()
         except Exception:
             logger.debug("Checkpointer close failed (already closed)")
 

@@ -96,7 +96,10 @@ class AgentConfig(BaseModel):
 class ProviderConfig(BaseModel):
     name: str = "anthropic"
     model: str = "claude-sonnet-4-6"
-    api_key: Optional[str] = None
+    # Redundantly flagged sensitive=True to exercise the redaction annotation
+    # walker against real config. Already covered by the _key suffix rule;
+    # the annotation is a regression-pin so the hybrid policy stays exercised.
+    api_key: Optional[str] = Field(default=None, json_schema_extra={"sensitive": True})
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     base_url: Optional[str] = None
@@ -272,6 +275,31 @@ class CostConfig(BaseModel):
     on_budget_exceeded: str = "downgrade"  # "downgrade" | "pause" | "abort"
 
 
+class DreamConfig(BaseModel):
+    enabled: bool = False  # Default false since it requires workspace setup
+    interval_hours: float = 2.0
+    max_batch_size: int = 20
+    max_iterations: int = 10
+    model: str = ""  # Empty = use default provider
+
+
+class SubAgentConfig(BaseModel):
+    enabled: bool = True
+    heartbeat_timeout: float = 120.0
+    task_timeout: float = 1800.0
+    max_iterations: int = 50
+    max_retries: int = 1
+    health_check_interval: float = 30.0
+    streaming: bool = True  # WS1: drive sub-agents via astream loop (False = single-shot fallback)
+
+
+class SwarmConfig(BaseModel):
+    enabled: bool = False
+    templates_dir: str = "templates"
+    workspace: str = "./workspace"
+    poll_interval: float = 5.0
+
+
 class AppConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -290,6 +318,9 @@ class AppConfig(BaseModel):
     streaming: StreamingConfig = Field(default_factory=StreamingConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     cost: CostConfig = Field(default_factory=CostConfig)
+    dream: DreamConfig = Field(default_factory=DreamConfig)
+    subagent: SubAgentConfig = Field(default_factory=SubAgentConfig)
+    swarm: SwarmConfig = Field(default_factory=SwarmConfig)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:

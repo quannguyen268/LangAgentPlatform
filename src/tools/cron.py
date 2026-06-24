@@ -123,20 +123,98 @@ async def schedule_task(prompt: str, schedule_type: str, schedule_value: str, mo
     return f"Task scheduled: id={task['id']}, type={schedule_type}, value={schedule_value}"
 
 
+def _to_utc_iso(dt: datetime) -> str:
+    """Return ``dt`` as a UTC ISO-8601 string. Naive inputs are assumed to be UTC."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _compute_next_run(task: dict) -> str | None:
+    """Best-effort next-run ISO timestamp (always UTC).
+
+    Returns ``None`` if the task has no future fire time:
+      - "once" tasks already fired (``last_run`` is set)
+      - "cron" / "interval" tasks whose schedule fails to parse
+      - unknown schedule types
+    """
+    schedule_type = task.get("type")
+    schedule_value = task.get("value", "")
+    if schedule_type == "once":
+        # A "once" task fires exactly once. Once last_run is recorded, there
+        # is no further next_run — the task is conceptually finished.
+        if task.get("last_run"):
+            return None
+        return schedule_value
+    if schedule_type == "cron":
+        try:
+            from croniter import croniter
+            base = datetime.now(timezone.utc)
+            return _to_utc_iso(croniter(schedule_value, base).get_next(datetime))
+        except Exception as e:
+            logger.warning(
+                "Failed to compute cron next_run for task %s: %s",
+                task.get("id"), e,
+            )
+            return None
+    if schedule_type == "interval":
+        try:
+            from datetime import timedelta
+            secs = int(schedule_value)
+            last_run_iso = task.get("last_run")
+            if last_run_iso:
+                base = datetime.fromisoformat(last_run_iso)
+            else:
+                base = datetime.fromisoformat(
+                    task.get("created_at", datetime.now(timezone.utc).isoformat())
+                )
+            return _to_utc_iso(base + timedelta(seconds=secs))
+        except Exception as e:
+            logger.warning(
+                "Failed to compute interval next_run for task %s: %s",
+                task.get("id"), e,
+            )
+            return None
+    return None
+
+
+def _to_api_dict(task: dict) -> dict:
+    """Project a stored task to the /v1/tasks response shape."""
+    return {
+        "task_id": task.get("id"),
+        "prompt": task.get("prompt", ""),
+        "schedule_type": task.get("type"),
+        "schedule_value": task.get("value"),
+        "model_tier": task.get("model_tier"),
+        "next_run": _compute_next_run(task),
+        "created_at": task.get("created_at"),
+    }
+
+
+async def list_active_tasks_structured() -> list[dict]:
+    """Return all active scheduled tasks in the /v1/tasks response shape.
+
+    Excludes inactive tasks (cancelled or completed). Used by both the
+    Management API endpoint and the ``list_tasks`` @tool.
+    """
+    async with get_tasks_lock():
+        tasks = _load_tasks()
+    return [_to_api_dict(t) for t in tasks if t.get("active", True)]
+
+
 @tool
 async def list_tasks() -> str:
     """List all active scheduled tasks."""
-    async with get_tasks_lock():
-        tasks = _load_tasks()
-    active = [t for t in tasks if t.get("active", True)]
-    if not active:
+    structured = await list_active_tasks_structured()
+    if not structured:
         return "No active scheduled tasks."
 
     lines = []
-    for t in active:
+    for t in structured:
         lines.append(
-            f"- [{t['id']}] {t['type']}={t['value']} | {t['prompt'][:PROMPT_PREVIEW_LEN]}"
-            f" | last_run={t.get('last_run', 'never')}"
+            f"- [{t['task_id']}] {t['schedule_type']}={t['schedule_value']} | "
+            f"{t['prompt'][:PROMPT_PREVIEW_LEN]}"
+            f" | next_run={t['next_run'] or 'unknown'}"
         )
     return "\n".join(lines)
 

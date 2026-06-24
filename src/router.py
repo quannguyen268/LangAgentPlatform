@@ -163,6 +163,10 @@ class MessageRouter:
         if not clean_text and not msg.image_base64:
             return None
 
+        # Dream commands
+        if clean_text.startswith("/dream"):
+            return await self._handle_dream_command(clean_text, msg)
+
         # Thread ID for LangGraph persistence (per-user isolation when user_id set)
         thread_id = self.get_thread_id(msg.channel, msg.chat_id, msg.user_id)
 
@@ -213,6 +217,56 @@ class MessageRouter:
             asyncio.create_task(self._post_hook(clean_text, agent_resp.text))
 
         return agent_resp
+
+    async def _handle_dream_command(self, text: str, msg) -> AgentResponse:
+        from pathlib import Path
+        from .memory.dream import DreamProcess
+        from .memory.gitstore import GitStore
+
+        parts = text.strip().split()
+        cmd = parts[0]
+
+        if cmd == "/dream" and len(parts) == 1:
+            # Trigger dream manually
+            memory_dir = str(Path(self._workspace, "memory"))
+            dream = DreamProcess(
+                workspace=self._workspace,
+                memory_dir=memory_dir,
+            )
+            try:
+                from langchain.chat_models import init_chat_model
+                provider = self._config.provider
+                dream_model = init_chat_model(f"{provider.name}:{provider.model}")
+                result = await dream.run(model=dream_model)
+                if result["status"] == "skipped":
+                    return AgentResponse(text="Dream skipped — no new history entries.")
+                if result["status"] == "failed":
+                    return AgentResponse(text=f"Dream failed in phase {result.get('phase')}: {result.get('error')}")
+                sha = result.get("commit_sha", "(none)")
+                return AgentResponse(text=f"Dream completed: processed {result['entries_processed']} entries, commit {sha}")
+            except Exception as e:
+                return AgentResponse(text=f"Dream error: {e}")
+
+        if cmd == "/dream-log":
+            memory_dir = Path(self._workspace, "memory")
+            gitstore = GitStore(str(memory_dir), tracked_files=["SOUL.md", "USER.md", "MEMORY.md"])
+            gitstore.init()
+            commits = gitstore.log_commits(limit=10)
+            if not commits:
+                return AgentResponse(text="No dream history yet.")
+            lines = [f"**{c['sha']}** — {c['message']}" for c in commits]
+            return AgentResponse(text="## Dream Log\n\n" + "\n".join(lines))
+
+        if cmd == "/dream-restore" and len(parts) >= 2:
+            sha = parts[1]
+            memory_dir = Path(self._workspace, "memory")
+            gitstore = GitStore(str(memory_dir), tracked_files=["SOUL.md", "USER.md", "MEMORY.md"])
+            gitstore.init()
+            if gitstore.restore_commit(sha):
+                return AgentResponse(text=f"Memory restored to {sha}.")
+            return AgentResponse(text=f"Commit {sha} not found.")
+
+        return AgentResponse(text="Unknown dream command. Use: /dream, /dream-log, /dream-restore {sha}")
 
     def _log_message(self, thread_id: str, role: str, content: str, msg: IncomingMessage) -> None:
         """Append message to JSONL session log."""

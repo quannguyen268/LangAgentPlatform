@@ -28,3 +28,9 @@ Thumbs.db
 
 # Claude
 .claude/
+.superpowers/
+
+# Web
+web/node_modules
+web/dist
+src/api/static/

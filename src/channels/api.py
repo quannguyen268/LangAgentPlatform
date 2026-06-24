@@ -69,9 +69,32 @@ class APIChannel(AbstractChannel):
 
     name = "api"
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8900) -> None:
+    # NB: this set does not normalize alternative IPv6 forms
+    # (e.g. "0:0:0:0:0:0:0:1", "[::1]", "::ffff:127.0.0.1"); rare hosts
+    # configured with those literals will spuriously trip the WARN.
+    _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8900,
+        workspace=None,
+        cost_tracker=None,
+        event_hub=None,
+        subagent_registry=None,
+        swarm=None,
+        config=None,
+        web_dist_path: str | None = None,
+    ) -> None:
         self._host = host
         self._port = port
+        self._workspace = workspace
+        self._cost_tracker = cost_tracker
+        self._event_hub = event_hub
+        self._subagent_registry = subagent_registry
+        self._swarm = swarm
+        self._config = config
+        self._web_dist_path = web_dist_path
         self._callback = None
         self._runner: web.AppRunner | None = None
         # Maps request_id -> asyncio.Queue[str | None]
@@ -82,13 +105,74 @@ class APIChannel(AbstractChannel):
     # AbstractChannel interface
     # ------------------------------------------------------------------
 
-    async def start(self) -> None:
-        """Start the aiohttp web server."""
-        app = web.Application()
+    def _warn_if_non_loopback(self) -> None:
+        """Emit a WARN when bound to a non-loopback host (Phase 2B-I is localhost-only)."""
+        if self._host not in self._LOOPBACK_HOSTS:
+            logger.warning(
+                "APIChannel: bound to non-loopback host %r without authentication. "
+                "Management endpoints (/v1/agents, /v1/teams, /v1/tasks, /v1/config) "
+                "are exposed to the network. Bind to 127.0.0.1 or add auth.",
+                self._host,
+            )
+
+    def _register_routes(self, app: web.Application) -> None:
+        """Mount all routes on the given app. Extracted for unit testing."""
+        # Existing chat routes
         app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
         app.router.add_get("/v1/models", self._handle_models)
         app.router.add_get("/health", self._handle_health)
 
+        # Phase 1B memory + cost routes
+        if self._workspace:
+            from ..api.routes import setup_legacy_routes
+            setup_legacy_routes(
+                app, workspace=self._workspace, cost_tracker=self._cost_tracker,
+            )
+
+        # WebSocket
+        if self._event_hub:
+            from ..api.websocket import setup_websocket
+            setup_websocket(app, self._event_hub)
+
+        # Phase 2B-I read-only management routes
+        from ..api.management import setup_management_routes
+        setup_management_routes(
+            app,
+            subagent_registry=self._subagent_registry,
+            swarm=self._swarm,
+            config=self._config,
+        )
+
+        # Phase 2B-II Web UI: static file serving + root redirect.
+        # Only wire up when the dist directory exists and was passed by main.py.
+        if self._web_dist_path:
+            from pathlib import Path
+            dist = Path(self._web_dist_path)
+            if dist.is_dir():
+                logger.info("APIChannel: serving web UI from %s", dist)
+                app.router.add_get("/", self._handle_root_redirect)
+                # NOTE: registration order matters — this add_get MUST precede
+                # add_static below, since aiohttp dispatches routes in insertion
+                # order. add_static does not auto-resolve directory URLs to
+                # index files, so the bare /web/ would 404 otherwise.
+                app.router.add_get("/web/", self._handle_web_index)
+                # Static assets at /web/* — show_index=False prevents the dist
+                # directory contents being listed if someone hits /web/assets/.
+                app.router.add_static(
+                    "/web/", path=str(dist),
+                    show_index=False, append_version=False,
+                )
+            else:
+                logger.warning(
+                    "APIChannel: web_dist_path %s does not exist; skipping web UI routes",
+                    dist,
+                )
+
+    async def start(self) -> None:
+        """Start the aiohttp web server."""
+        self._warn_if_non_loopback()
+        app = web.Application()
+        self._register_routes(app)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
@@ -126,6 +210,22 @@ class APIChannel(AbstractChannel):
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def _handle_root_redirect(self, request: web.Request) -> web.Response:
+        """Redirect / to /web/ so operators landing on the bare host see the dashboard."""
+        raise web.HTTPFound("/web/")
+
+    async def _handle_web_index(self, request: web.Request) -> web.FileResponse:
+        """Serve index.html for the bare /web/ URL.
+
+        aiohttp's ``add_static`` does NOT auto-serve index.html for directory
+        URLs (the ``show_index`` flag controls listing, not index resolution).
+        We need an explicit handler that returns ``index.html`` from the dist
+        root so the SPA boots when the user visits /web/.
+        """
+        from pathlib import Path
+        assert self._web_dist_path  # guarded by the caller
+        return web.FileResponse(Path(self._web_dist_path) / "index.html")
 
     async def _handle_models(self, request: web.Request) -> web.Response:
         return web.json_response(

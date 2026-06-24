@@ -534,3 +534,8 @@ class TestLoadConfig:
         assert cfg.web.brave_api_key is None
         assert cfg.logging.level == "DEBUG"
         assert cfg.scheduler.poll_interval == 30
+
+
+def test_subagent_streaming_defaults_true():
+    from src.config import SubAgentConfig
+    assert SubAgentConfig().streaming is True

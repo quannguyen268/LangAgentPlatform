@@ -74,6 +74,7 @@ Decisions made during design review, with rationale:
 | AD-11 | **Heartbeat folded into sub-agent health monitoring** — BaseStore timestamps, not a separate feature. | Simpler architecture, heartbeat is just one aspect of health monitoring. |
 | AD-12 | **3-layer failure detection + priority chain recovery** for sub-agents — heartbeat + timeout + iteration limit → retry → escalate → reassign → abort. | Defense in depth. No single detection covers all failure modes. |
 | AD-13 | **Web UI + Chat channels** — Chat (Telegram, Discord, CLI) for conversation; Web UI for management (swarm dashboard, config, cost). Not blocking core platform. | Best of both: chat on-the-go, dashboard at desk. Web UI is Phase 2, doesn't block Phase 0-1. |
+| AD-14 | **DeepAgents + LangChain Middleware** — Use `create_deep_agent()` with composable middleware instead of hand-built StateGraph. Middleware replaces custom graph nodes for permissions (HumanInTheLoopMiddleware), compaction (SummarizationMiddleware + ContextEditingMiddleware), retry (ModelRetryMiddleware + ToolRetryMiddleware), tool limits (ToolCallLimitMiddleware), and sub-agents (SubAgentMiddleware). Keep custom modules only where no middleware equivalent exists: CostTracker, StreamEvent, FileStateTracker, RoutingChatModel. | DeepAgents already provides the graph, tools, skills, memory, filesystem backend. Middleware is composable, tested, and maintained by LangChain. Hand-building the graph reimplements what DeepAgents gives for free. Reverting to `create_deep_agent()` with middleware is a ~400-line deletion and ~30-line addition. |
 
 ---
 
@@ -183,75 +184,114 @@ Decisions made during design review, with rationale:
 
 ## 4. The Agent
 
-### 4.1 Single Graph, Three Modes
+### 4.1 Single Agent, Three Modes
 
-The agent is one LangGraph StateGraph. It does not have separate "master" and "worker" graphs. The distinction is behavioral, driven by which tools it uses:
+The agent is built with `create_deep_agent()` from DeepAgents, composed with LangChain middleware (AD-14). It does not use a hand-built StateGraph — DeepAgents manages the graph internally. The distinction between modes is behavioral, driven by which tools the agent uses:
 
 - **Solo mode**: Agent uses standard tools (read, write, exec, web_search, etc.) to handle a task directly. This is the default for simple requests.
 - **Conductor mode**: Agent uses orchestration tools (spawn_agent, assign_task, monitor_agents) to decompose complex goals into sub-agent teams. The agent decides this autonomously based on task complexity.
 - **Delegator mode**: User explicitly manages agents via slash commands (/spawn, /assign, /recall). The agent assists but doesn't make autonomous orchestration decisions.
 
-### 4.2 Agent State
+### 4.2 Agent Construction (DeepAgents + Middleware)
 
 ```python
-from langgraph.graph import StateGraph, MessagesState
-from typing import Any
+from deepagents import create_deep_agent
+from deepagents.backends import FilesystemBackend
+from langchain.agents.middleware import (
+    SummarizationMiddleware,
+    ModelRetryMiddleware,
+    ToolRetryMiddleware,
+    ModelCallLimitMiddleware,
+    ToolCallLimitMiddleware,
+    ContextEditingMiddleware,
+    ClearToolUsesEdit,
+    HumanInTheLoopMiddleware,
+)
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-class AgentState(MessagesState):
-    # Core
-    active_tier: str = "standard"           # Current LLM tier
-    session_id: str = ""                    # Thread ID for checkpointing
-    channel: str = ""                       # Source channel name
-    user_id: str = ""                       # User identifier
-    
-    # Context (injected before each invocation)
-    memory_context: str = ""                # SOUL + USER + MEMORY + AGENT
-    skills_summary: str = ""                # Available skills summary
-    
-    # Orchestration (only populated in conductor/delegator mode)
-    active_sub_agents: dict[str, dict] = {} # agent_id → {role, tier, tools, status}
-    pending_tasks: list[dict] = []          # Unassigned tasks
-    
-    # Permissions
-    tool_permissions: dict[str, str] = {}   # tool_name → "allow"/"deny"/"ask"
-    
-    # Cost
-    cost_this_session: float = 0.0          # Running cost in cents
-    cost_budget: float | None = None        # Optional budget limit
+agent = create_deep_agent(
+    model=routing_chat_model,           # RoutingChatModel (multi-tier)
+    tools=[                             # Custom tools (beyond DeepAgents built-ins)
+        web_search, web_fetch,          # Web tools
+        schedule_task, list_tasks, cancel_task,  # Scheduling
+        host_execute,                   # Gateway bridge
+        switch_model,                   # Tier switching
+    ],
+    memory=["IDENTITY.md", "AGENT.md", "MEMORY.md"],  # Auto-loaded from workspace
+    skills=["skills/"],                 # Auto-discovered, progressive loading
+    backend=FilesystemBackend(root_dir="./workspace", virtual_mode=True),
+    interrupt_on={                      # Permission system (replaces PermissionManager)
+        "exec": True,                  # Requires approval
+        "host_execute": True,
+        "write_file": {"allowed_decisions": ["approve", "edit", "reject"]},
+        "edit_file": {"allowed_decisions": ["approve", "edit", "reject"]},
+        "read_file": False,            # No approval needed
+        "glob": False,
+        "grep": False,
+        "web_search": False,
+        "web_fetch": False,
+    },
+    subagents=[...],                    # Phase 1C — sub-agent definitions
+    checkpointer=AsyncSqliteSaver.from_conn_string("data/checkpoints.db"),
+    middleware=[
+        # Resilience
+        ModelRetryMiddleware(
+            max_retries=3,
+            retry_on=(TimeoutError, ConnectionError),
+            backoff_factor=2.0,
+        ),
+        ToolRetryMiddleware(
+            max_retries=2,
+            backoff_factor=2.0,
+            initial_delay=1.0,
+        ),
+
+        # Cost control
+        ModelCallLimitMiddleware(thread_limit=50, run_limit=20),
+        ToolCallLimitMiddleware(thread_limit=100, run_limit=30),
+
+        # Context management
+        SummarizationMiddleware(
+            model="gpt-4o-mini",        # Cheap model for summarization
+            trigger=("tokens", 100000), # Trigger at 100K tokens
+            keep=("messages", 20),      # Preserve last 20 messages
+        ),
+        ContextEditingMiddleware(edits=[
+            ClearToolUsesEdit(
+                trigger=80000,          # Clear old tool outputs at 80K tokens
+                keep=5,                 # Keep last 5 tool results
+                placeholder="[cleared]",
+            ),
+        ]),
+    ],
+)
 ```
 
-### 4.3 Graph Structure
+### 4.3 What DeepAgents Provides (built-in)
 
-```python
-graph = StateGraph(AgentState)
+DeepAgents' `create_deep_agent()` automatically includes:
 
-# Nodes
-graph.add_node("agent", agent_reasoning_node)       # LLM call with RoutingChatModel
-graph.add_node("permission_check", permission_node)  # Check tool permissions
-graph.add_node("tools", tool_executor_node)          # Execute tools (parallel capable)
-graph.add_node("monitor", sub_agent_monitor_node)    # Check sub-agent health (periodic)
+| Built-in Feature | Description |
+|---|---|
+| **FilesystemMiddleware** | read_file, write_file, edit_file, glob, grep tools based on backend |
+| **TodoListMiddleware** | Task planning and tracking |
+| **SubAgentMiddleware** | Spawn and coordinate sub-agents |
+| **SummarizationMiddleware** | Context compression when configured |
+| **SkillsMiddleware** | Progressive skill loading from .md files |
+| **MemoryMiddleware** | Persists memory files (IDENTITY.md, etc.) across sessions |
+| **HumanInTheLoopMiddleware** | Approval dialogs via `interrupt_on` parameter |
+| **PatchToolCallsMiddleware** | Fixes interrupted tool call message history |
+| **AnthropicPromptCachingMiddleware** | Automatic prompt caching for Anthropic models |
 
-# Edges
-graph.add_conditional_edges("agent", route_after_reasoning)
-# route_after_reasoning returns:
-#   "permission_check" → if tool calls present
-#   "monitor"          → if sub-agents active and no tool calls
-#   END                → if no tool calls and no active sub-agents
+### 4.4 What We Add (custom modules)
 
-graph.add_conditional_edges("permission_check", route_after_permission)
-# route_after_permission returns:
-#   "tools"    → all tools approved
-#   "agent"    → some tools denied, re-plan
-#   interrupt  → needs user approval (LangGraph interrupt())
-
-graph.add_edge("tools", "agent")       # After tool execution, reason again
-graph.add_edge("monitor", "agent")     # After monitoring, reason with updated state
-
-# Compile
-checkpointer = AsyncSqliteSaver.from_conn_string("data/checkpoints.db")
-store = InMemoryStore()  # InMemory for dev; use SQLite/Postgres BaseStore in production
-app = graph.compile(checkpointer=checkpointer, store=store)
-```
+| Custom Module | Purpose | Why No Middleware Equivalent |
+|---|---|---|
+| **RoutingChatModel** | Multi-tier LLM routing (lite→expert) | Unique to our platform |
+| **CostTracker** | Per-user, per-tier, per-agent cost accounting | No middleware tracks cost at this granularity |
+| **StreamEvent** | 14 typed events for channel rendering | Channel-specific rendering logic |
+| **FileStateTracker** | Read-before-edit warnings | Unique validation layer |
+| **Custom tools** | web_search, host_execute, schedule_task, switch_model | Domain-specific tools |
 
 ### 4.4 Orchestration Tools
 
@@ -387,29 +427,35 @@ model_router:
 - Scheduled tasks specify tier at creation time
 - On provider error: automatic fallback to next lower tier
 
-### 5.3 Retry with Exponential Backoff
+### 5.3 Retry & Resilience (via Middleware — AD-14)
+
+Retry logic is handled by LangChain middleware, not custom code:
 
 ```python
-RETRYABLE_STATUS = {429, 500, 502, 503, 529}
-MAX_RETRIES = 3
-BASE_DELAY = 1.0
-MAX_DELAY = 30.0
+# Model-level retries (provider errors, rate limits)
+ModelRetryMiddleware(
+    max_retries=3,
+    retry_on=(TimeoutError, ConnectionError),
+    backoff_factor=2.0,
+    initial_delay=1.0,
+    max_delay=60.0,
+    jitter=True,
+)
 
-async def call_with_retry(fn, *args, **kwargs):
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            return await fn(*args, **kwargs)
-        except APIError as e:
-            if e.status_code not in RETRYABLE_STATUS or attempt == MAX_RETRIES:
-                raise
-            delay = min(BASE_DELAY * (2 ** attempt) + random.uniform(0, 1), MAX_DELAY)
-            retry_after = e.headers.get("Retry-After")
-            if retry_after:
-                delay = max(delay, float(retry_after))
-            await asyncio.sleep(delay)
+# Tool-level retries (tool execution failures)
+ToolRetryMiddleware(
+    max_retries=2,
+    tools=["web_search", "web_fetch", "host_execute"],  # Only retry these
+    retry_on=(ConnectionError, TimeoutError),
+    backoff_factor=2.0,
+    on_failure="return_message",  # Return error message instead of crashing
+)
+
+# Model fallback (switch to alt model on repeated failure)
+ModelFallbackMiddleware(fallback_model="gpt-4o-mini")
 ```
 
-Non-retryable conditions: `billing_hard_limit`, `payment_required`, `insufficient_quota`.
+Non-retryable conditions (handled by `init_chat_model` level): `billing_hard_limit`, `payment_required`, `insufficient_quota`.
 
 ---
 
@@ -987,24 +1033,39 @@ async def schedule_task(
 
 ## 14. Permission & Security System
 
-### 14.1 Permission Modes
+### 14.1 Permission via `interrupt_on` (AD-14)
 
-| Mode | Behavior |
-|------|----------|
-| **default** | Ask before write/execute operations (file writes, shell, gateway) |
-| **auto** | Allow everything. For trusted/sandboxed environments. |
-| **plan** | Block all write operations. Read-only exploration. |
+Permissions are handled by DeepAgents' built-in `HumanInTheLoopMiddleware`, configured via the `interrupt_on` parameter on `create_deep_agent()`:
 
-### 14.2 LangGraph interrupt() for Approvals
+```python
+interrupt_on={
+    # Write/execute tools require approval
+    "exec": True,
+    "host_execute": True,
+    "write_file": {"allowed_decisions": ["approve", "edit", "reject"]},
+    "edit_file": {"allowed_decisions": ["approve", "edit", "reject"]},
+    "schedule_task": True,
+    # Read tools: no approval needed
+    "read_file": False,
+    "glob": False,
+    "grep": False,
+    "web_search": False,
+    "web_fetch": False,
+}
+```
 
-When a tool requires permission and mode is `default`:
+**How it works:**
+1. Agent calls a tool marked with `True` or `allowed_decisions`
+2. DeepAgents interrupts the graph, checkpoints state
+3. Channel adapter renders approval UI (Telegram: inline keyboard, CLI: y/n prompt)
+4. User responds → graph resumes from checkpoint
+5. If approved: tool executes. If rejected: tool skipped, agent re-plans.
+6. If `allowed_decisions` includes `"edit"`: user can modify tool arguments before approval
 
-1. Permission check node evaluates the tool call against rules
-2. If approval needed: `interrupt({"tool": name, "args": args})` 
-3. Graph checkpoints and pauses
-4. Channel adapter renders approval UI (Telegram: inline keyboard, CLI: y/n)
-5. User responds → graph resumes from checkpoint
-6. If approved: tool executes. If denied: tool skipped, agent re-plans.
+**Permission modes** are implemented by swapping the `interrupt_on` dict at config time:
+- **default**: Write tools = True, read tools = False (as above)
+- **auto**: All tools = False (no interrupts)
+- **plan**: Write tools blocked entirely (not passed to agent's tool list)
 
 ### 14.3 Security Layers
 
@@ -1024,49 +1085,53 @@ When a tool requires permission and mode is `default`:
 
 ---
 
-## 15. Context Compression
+## 15. Context Compression (via Middleware — AD-14)
 
-### 15.1 Problem
+### 15.1 Approach
 
-LangGraph checkpoints save full message history. Long conversations exceed the LLM's context window. We need to compress old messages while preserving task state.
+Context compression is handled by two LangChain middleware, not custom code:
 
-### 15.2 Design
-
-Two-stage compression, triggered by token count threshold:
-
-**Stage 1 — Micro-compact (within conversation):**
-- When estimated tokens > 80% of context window
-- Summarize oldest tool results (keep tool calls, replace verbose results with summaries)
-- Preserve: last N user/assistant turns, all pending tool calls, system prompt
-- Implementation: custom LangGraph node that rewrites message history before the agent node
-
-**Stage 2 — Consolidation (to persistent memory):**
-- When estimated tokens > 90% of context window after micro-compact
-- Summarize entire old conversation segment into history.jsonl
-- Reset conversation to: system prompt + summary message + recent turns
-- Preserves continuity: "Previous context: [summary]"
-
-### 15.3 Token Estimation
-
+**SummarizationMiddleware** — Compresses conversation history when token thresholds are reached:
 ```python
-def estimate_tokens(messages: list[BaseMessage]) -> int:
-    """Fast token estimation without calling the tokenizer API.
-    
-    Uses character count heuristic: ~4 chars per token for English.
-    Accurate to within ~10%, sufficient for threshold decisions.
-    """
-    total_chars = sum(len(m.content) for m in messages if isinstance(m.content, str))
-    return total_chars // 4
+SummarizationMiddleware(
+    model="gpt-4o-mini",            # Cheap model for summarization
+    trigger=[
+        ("tokens", 100000),         # Trigger at 100K tokens
+        ("messages", 50),           # Or at 50 messages
+    ],
+    keep=("messages", 20),          # Preserve last 20 messages
+)
 ```
 
-### 15.4 Configuration
+**ContextEditingMiddleware** — Clears old tool outputs to free context space:
+```python
+ContextEditingMiddleware(edits=[
+    ClearToolUsesEdit(
+        trigger=80000,              # At 80K tokens
+        keep=5,                     # Keep last 5 tool results
+        clear_tool_inputs=False,    # Keep tool call arguments
+        placeholder="[cleared]",    # Replace with this text
+    ),
+])
+```
+
+### 15.2 How It Works
+
+1. **ContextEditingMiddleware** fires first — clears verbose old tool outputs (cheaper than summarization)
+2. If still over threshold, **SummarizationMiddleware** kicks in — uses a lightweight LLM to summarize old conversation
+3. Recent messages (last 20) are always preserved
+4. Summarized context is injected as a summary message maintaining continuity
+
+### 15.3 Configuration
 
 ```yaml
 context:
-  max_tokens: 128000              # Model context window
-  compact_threshold: 0.8          # Trigger micro-compact at 80%
-  consolidate_threshold: 0.9      # Trigger consolidation at 90%
-  preserve_recent_turns: 10       # Always keep last 10 turns
+  summarization_model: "gpt-4o-mini"   # Cheap model for summarization
+  summarization_trigger_tokens: 100000  # Token threshold
+  summarization_trigger_messages: 50    # Message count threshold
+  keep_recent_messages: 20              # Always preserve last N
+  clear_tool_outputs_trigger: 80000     # Token threshold for tool output clearing
+  clear_tool_outputs_keep: 5            # Keep last N tool results
 ```
 
 ---
